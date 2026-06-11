@@ -139,6 +139,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_bytes,
     cache_image_from_bytes,
+    resolve_ws_proxy,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
 from hermes_constants import get_hermes_home
@@ -1307,7 +1308,14 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
             kwargs["ping_interval"] = adapter._ws_ping_interval
         if adapter._ws_ping_timeout is not None and "ping_timeout" not in kwargs:
             kwargs["ping_timeout"] = adapter._ws_ping_timeout
-        return original_connect(*args, **kwargs)
+        # macOS 系统代理（Surge/Clash 等）会阻断 WebSocket CONNECT 隧道，
+        # 检测到系统代理时强制直连（proxy=None），避免 InvalidProxyMessage 错误。
+        # 用户可通过 FEISHU_WS_PROXY 环境变量显式指定代理。
+        if "proxy" not in kwargs:
+            ws_proxy = resolve_ws_proxy(platform_env_var="FEISHU_WS_PROXY")
+            if ws_proxy:
+                kwargs.update(ws_proxy)
+        return await original_connect(*args, **kwargs)
 
     def _configure_with_overrides(conf: Any) -> Any:
         if original_configure is None:
