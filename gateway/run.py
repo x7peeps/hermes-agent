@@ -13442,7 +13442,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "messages": [],
                                 "api_calls": 0,
                                 "tools": [],
-                                "history_offset": len(history),
+                                "history_offset": 0,
                                 "session_id": session_id,
                                 "response_previewed": False,
                             }
@@ -13506,7 +13506,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [],
                 "api_calls": 0,
                 "tools": [],
-                "history_offset": len(history),
+                "history_offset": 0,
                 "session_id": session_id,
                 "response_previewed": False,
             }
@@ -13523,7 +13523,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ],
             "api_calls": 1,
             "tools": [],
-            "history_offset": len(history),
+            "history_offset": 0,
             "session_id": session_id,
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }

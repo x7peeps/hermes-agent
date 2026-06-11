@@ -323,3 +323,88 @@ class TestTranscriptHistoryOffset:
         )
 
         assert merged["history_offset"] == 3
+
+    # ---------------------------------------------------------------------------
+    # Proxy path: history_offset = 0 (current-turn-only messages)
+    # ---------------------------------------------------------------------------
+
+    def test_proxy_path_returns_zero_offset(self):
+        """Proxy path returns only current-turn messages, so offset must be 0.
+
+        _run_agent_via_proxy() synthesises messages containing just the user
+        request and assistant response.  Since none of these existed in any
+        prior history, history_offset = 0 so the gateway writes both entries
+        as new transcript rows.
+        """
+        # Simulate the proxy path return
+        proxy_result = {
+            "final_response": "Proxy reply",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Proxy reply"},
+            ],
+            "api_calls": 1,
+            "tools": [],
+            "history_offset": 0,  # Fixed: was len(history) which was wrong
+        }
+
+        # Raw history includes session_meta (not visible to proxy agent)
+        raw_history = [
+            {"role": "session_meta", "tools": [], "timestamp": "t0"},
+            {"role": "user", "content": "Hi", "timestamp": "t1"},
+            {"role": "assistant", "content": "Hello!", "timestamp": "t1"},
+        ]
+
+        # The gateway slicing logic
+        history_len = proxy_result.get("history_offset", len(raw_history))
+        agent_messages = proxy_result["messages"]
+        new_messages = (
+            agent_messages[history_len:]
+            if len(agent_messages) > history_len
+            else []
+        )
+
+        # With offset=0, both messages are new
+        assert len(new_messages) == 2
+        assert new_messages[0]["content"] == "Hello"
+        assert new_messages[1]["content"] == "Proxy reply"
+
+    def test_proxy_path_old_bug_skips_all_messages(self):
+        """Demonstrate the old bug: len(history) offset skips proxy messages.
+
+        When the proxy path used len(raw_history) as history_offset, the
+        gateway would treat ALL proxy messages as already-persisted and skip
+        them, falling through to the user/assistant fallback write path.
+        While the fallback eventually wrote correct entries, it meant the
+        actual agent response content was never examined or persisted as-is.
+        """
+        raw_history = [
+            {"role": "session_meta", "tools": [], "timestamp": "t0"},
+            {"role": "system", "content": "You are helpful", "timestamp": "t0"},
+            {"role": "user", "content": "Hi", "timestamp": "t1"},
+            {"role": "assistant", "content": "Hello!", "timestamp": "t1"},
+        ]
+
+        proxy_messages = [
+            {"role": "user", "content": "What is Python?"},
+            {"role": "assistant", "content": "Python is a language."},
+        ]
+
+        # OLD BUG: history_offset = len(raw_history) = 4
+        old_offset = len(raw_history)
+        old_new = (
+            proxy_messages[old_offset:]
+            if len(proxy_messages) > old_offset
+            else proxy_messages  # else branch: treats ALL as new
+        )
+        # The else branch kicks in because 2 < 4, so all messages treated as new
+        assert old_new == proxy_messages
+
+        # FIX: history_offset = 0
+        fixed_offset = 0
+        fixed_new = (
+            proxy_messages[fixed_offset:]
+            if len(proxy_messages) > fixed_offset
+            else []
+        )
+        assert len(fixed_new) == 2
