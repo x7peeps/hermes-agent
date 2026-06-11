@@ -1280,6 +1280,35 @@ def _strip_edge_self_mentions(
                 break
         else:
             return remaining
+def _detect_system_https_proxy() -> str | None:
+    """Detect system HTTP/HTTPS proxy for WebSocket connections.
+
+    Checks env vars first (http_proxy/HTTPS_PROXY), then macOS system proxy
+    preferences. Returns a proxy URL string like 'http://127.0.0.1:6152' or None.
+    """
+    for var in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        val = os.environ.get(var)
+        if val:
+            return val
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["scutil", "--proxy"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            import re
+            http_host = re.search(r'HTTPProxy\s*:\s*(\S+)', result.stdout)
+            http_port = re.search(r'HTTPPort\s*:\s*(\d+)', result.stdout)
+            https_host = re.search(r'HTTPSProxy\s*:\s*(\S+)', result.stdout)
+            https_port = re.search(r'HTTPSPort\s*:\s*(\d+)', result.stdout)
+            host = https_host.group(1) if https_host else (http_host.group(1) if http_host else None)
+            port = https_port.group(1) if https_port else (http_port.group(1) if http_port else None)
+            if host and port:
+                return f"http://{host}:{port}"
+    except Exception:
+        pass
+    return None
 
 
 def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
@@ -1308,9 +1337,10 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
             kwargs["ping_interval"] = adapter._ws_ping_interval
         if adapter._ws_ping_timeout is not None and "ping_timeout" not in kwargs:
             kwargs["ping_timeout"] = adapter._ws_ping_timeout
-        # macOS 系统代理（Surge/Clash 等）会阻断 WebSocket CONNECT 隧道，
-        # 检测到系统代理时强制直连（proxy=None），避免 InvalidProxyMessage 错误。
-        # 用户可通过 FEISHU_WS_PROXY 环境变量显式指定代理。
+        # Surge/Clash 等系统代理对 WebSocket CONNECT 隧道兼容性差，
+        # 检测到代理时强制 proxy=None 直连（websockets 默认 proxy=True
+        # 会通过 urllib.request.getproxies() 检测到系统代理然后走代理，
+        # 但系统代理软件可能返回非标准数据导致 InvalidProxyMessage）。
         if "proxy" not in kwargs:
             ws_proxy = resolve_ws_proxy(platform_env_var="FEISHU_WS_PROXY")
             if ws_proxy:
