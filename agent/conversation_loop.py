@@ -1166,6 +1166,14 @@ def run_conversation(
                             compression_attempts = 0
                             _retry.primary_recovery_attempted = False
                             continue
+                        # ── Local Ollama fallback as last resort ──
+                        agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                        from agent.chat_completion_helpers import try_local_fallback
+                        if try_local_fallback(agent):
+                            retry_count = 0
+                            compression_attempts = 0
+                            primary_recovery_attempted = False
+                            continue
                         # No fallback available — surface buffered context
                         # so user sees the rate-limit message that led here.
                         agent._flush_status_buffer()
@@ -1522,6 +1530,14 @@ def run_conversation(
                         compression_attempts = 0
                         _retry.primary_recovery_attempted = False
                         continue
+                    # ── Local Ollama fallback as last resort ──
+                    agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                    from agent.chat_completion_helpers import try_local_fallback
+                    if try_local_fallback(agent):
+                        retry_count = 0
+                        compression_attempts = 0
+                        primary_recovery_attempted = False
+                        continue
 
                     # Check for error field in response (some providers include this)
                     error_msg = "Unknown"
@@ -1594,6 +1610,14 @@ def run_conversation(
                             retry_count = 0
                             compression_attempts = 0
                             _retry.primary_recovery_attempted = False
+                            continue
+                        # ── Local Ollama fallback as last resort ──
+                        agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                        from agent.chat_completion_helpers import try_local_fallback
+                        if try_local_fallback(agent):
+                            retry_count = 0
+                            compression_attempts = 0
+                            primary_recovery_attempted = False
                             continue
                         # Terminal — flush buffered retry trace so user sees what happened.
                         agent._flush_status_buffer()
@@ -3846,6 +3870,14 @@ def run_conversation(
                         compression_attempts = 0
                         _retry.primary_recovery_attempted = False
                         continue
+                    # ── Local Ollama fallback as last resort ──
+                    agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                    from agent.chat_completion_helpers import try_local_fallback
+                    if try_local_fallback(agent):
+                        retry_count = 0
+                        compression_attempts = 0
+                        primary_recovery_attempted = False
+                        continue
                     if api_kwargs is not None:
                         agent._dump_api_request_debug(
                             api_kwargs, reason="non_retryable_client_error", error=api_error,
@@ -4043,6 +4075,14 @@ def run_conversation(
                         retry_count = 0
                         compression_attempts = 0
                         _retry.primary_recovery_attempted = False
+                        continue
+                    # ── Local Ollama fallback as last resort ──
+                    agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                    from agent.chat_completion_helpers import try_local_fallback
+                    if try_local_fallback(agent):
+                        retry_count = 0
+                        compression_attempts = 0
+                        primary_recovery_attempted = False
                         continue
                     # Terminal — flush buffered retry/fallback trace.
                     agent._flush_status_buffer()
@@ -5239,8 +5279,13 @@ def run_conversation(
                             continue
 
                     # Exhausted retries and fallback chain (or no
-                    # fallback configured).  Fall through to the
-                    # "(empty)" terminal.
+                    # fallback configured). Try local Ollama as last resort.
+                    agent._buffer_status("🔄 All providers exhausted — trying local Ollama...")
+                    from agent.chat_completion_helpers import try_local_fallback
+                    if try_local_fallback(agent):
+                        agent._empty_content_retries = 0
+                        continue
+
                     # Surface the buffered retry/fallback trace so the
                     # user can see what was attempted before "(empty)".
                     agent._flush_status_buffer()

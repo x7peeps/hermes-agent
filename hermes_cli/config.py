@@ -3340,14 +3340,20 @@ DEFAULT_CONFIG = {
     "paste_collapse_threshold_fallback": 5,
     "paste_collapse_char_threshold": 2000,
 
-    # --- Billing Reminder ---
-    # When billing exhaustion is detected, optionally remind the user
-    # via a daily PS appended to the first conversation response.
-    "billing_reminder": {
+    # --- Local Fallback (Ollama) ---
+    # When all remote providers fail, attempt to use a local Ollama model
+    # to keep the conversation going.
+    "local_fallback": {
         "enabled": False,
-        "ps_only": True,
-        "max_frequency": "daily",
-        "dm_only": True,
+        "model": "qwen3.5:0.8b",
+        "auto_pull": True,
+        "auto_install": False,
+        "ollama_binary": "ollama",
+        "ollama_host": "http://localhost:11434",
+        "serve_timeout": 10,
+        "download_timeout": 300,
+        "ask_user": True,
+        "auto_restore_primary": True,
     },
 
 

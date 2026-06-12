@@ -1186,7 +1186,13 @@ def init_agent(
             print(f"🔄 Fallback model: {fb['model']} ({fb['provider']})")
         else:
             print(f"🔄 Fallback chain ({len(agent._fallback_chain)} providers): " +
-                  " → ".join(f"{f['model']} ({f['provider']})" for f in agent._fallback_chain))
+                  " → ".join(f"{f['model']} ({f['provider']})\n" for f in agent._fallback_chain))
+
+    # Local fallback config (Ollama) — loaded once at init
+    from hermes_cli.config import cfg_get
+
+    agent._local_fallback_config = cfg_get("local_fallback", {})
+    agent._on_local_fallback = False
 
     # Get available tools with filtering. Capture the registry generation this
     # snapshot is derived from FIRST, so a later concurrent refresh can tell
