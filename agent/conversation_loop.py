@@ -5596,6 +5596,80 @@ def run_conversation(
         _pending_verification_response=_pending_verification_response,
     )
 
+    # Background memory/skill review — runs AFTER the response is delivered
+    # so it never competes with the user's task for model attention.
+    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+        try:
+            agent._spawn_background_review(
+                messages_snapshot=list(messages),
+                review_memory=_should_review_memory,
+                review_skills=_should_review_skills,
+            )
+        except Exception:
+            pass  # Background review is best-effort
+
+    # Note: Memory provider on_session_end() + shutdown_all() are NOT
+    # called here — run_conversation() is called once per user message in
+    # multi-turn sessions. Shutting down after every turn would kill the
+    # provider before the second message. Actual session-end cleanup is
+    # handled by the CLI (atexit / /reset) and gateway (session expiry /
+    # _reset_session).
+
+    # Plugin hook: on_session_end
+    # Fired at the very end of every run_conversation call.
+    # Plugins can use this for cleanup, flushing buffers, etc.
+    try:
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _invoke_hook(
+            "on_session_end",
+            session_id=agent.session_id,
+            task_id=effective_task_id,
+            turn_id=turn_id,
+            completed=completed,
+            interrupted=interrupted,
+            model=agent.model,
+            platform=getattr(agent, "platform", None) or "",
+        )
+    except Exception as exc:
+        logger.warning("on_session_end hook failed: %s", exc)
+
+    # ── Billing reminder PS ──
+    # If billing exhaustion was detected and not yet reminded today, append
+    # a gentle PS to the final response (never a standalone message).
+    try:
+        from agent.billing_notice import BillingNoticeManager
+        from hermes_cli.config import load_config
+
+        _cfg = load_config()
+        _br_cfg = _cfg.get("billing_reminder", {})
+        if _br_cfg.get("enabled", False):
+            _platform = str(getattr(agent, "platform", None) or "")
+            _dm_only = _br_cfg.get("dm_only", True)
+            _is_dm = not _platform or "/" not in _platform
+            if not _dm_only or _is_dm:
+                _bnm = BillingNoticeManager()
+                if _bnm.should_remind():
+                    _state = _bnm.get_state()
+                    if _state:
+                        _final = result.get("final_response", "")
+                        if isinstance(_final, str) and len(_final.strip()) > 20:
+                            _provider = _state.get("provider", "unknown")
+                            _date = _state.get("detected_date", "recently")
+                            _ps = (
+                                f"\n\n---\n"
+                                f"_PS: Your {_provider} account appears to have "
+                                f"insufficient billing as of {_date}. Future "
+                                f"conversations may fall back to alternative "
+                                f"providers or local models if billing "
+                                f"isn't resolved._"
+                            )
+                            result["final_response"] = _final + _ps
+                            _bnm.mark_reminded()
+    except Exception:
+        pass  # Never let billing notice break the conversation loop
+
+    return result
+
 
 
 __all__ = ["run_conversation"]

@@ -3340,53 +3340,16 @@ DEFAULT_CONFIG = {
     "paste_collapse_threshold_fallback": 5,
     "paste_collapse_char_threshold": 2000,
 
-    # Computer Use (cua-driver) toolset settings.
-    "computer_use": {
-        # cua-driver ships with anonymous usage telemetry (PostHog) ENABLED
-        # by default upstream. Hermes disables it for our users unless they
-        # explicitly opt in here. When false (default), Hermes sets
-        # CUA_DRIVER_RS_TELEMETRY_ENABLED=0 in the cua-driver child env for
-        # every invocation (MCP backend, status, doctor, install). Set true
-        # to let cua-driver use its own default (telemetry on).
-        "cua_telemetry": False,
+    # --- Billing Reminder ---
+    # When billing exhaustion is detected, optionally remind the user
+    # via a daily PS appended to the first conversation response.
+    "billing_reminder": {
+        "enabled": False,
+        "ps_only": True,
+        "max_frequency": "daily",
+        "dm_only": True,
     },
 
-    # Hermes Desktop (Electron app) launch options. These only affect
-    # `hermes desktop`; they do not touch the CLI/gateway.
-    "desktop": {
-        # Extra Electron command-line flags appended to every desktop launch,
-        # e.g. ["--ozone-platform=x11"] on headless/VM X11 hosts that need an
-        # explicit ozone backend, or GPU workaround flags. A list of strings;
-        # a single string is also accepted and shell-split.
-        "electron_flags": [],
-        # GPU hardware acceleration policy for the desktop app:
-        #   "auto"  - let the app detect remote displays (SSH/VNC/RDP) and
-        #             disable GPU only then (default; current behavior).
-        #   true    - always disable GPU acceleration (software rendering).
-        #             Use on no-GPU VMs / Proxmox hosts where the GPU path hangs.
-        #   false   - always keep GPU acceleration on, even over a remote display.
-        # Bridged to the HERMES_DESKTOP_DISABLE_GPU env var the Electron app reads.
-        "disable_gpu": "auto",
-    },
-
-
-    # Google Vertex AI provider (Gemini via the OpenAI-compatible endpoint).
-    # Auth is OAuth2 (short-lived access tokens minted from a service-account
-    # JSON or Application Default Credentials) — NOT a static API key. The
-    # credential *path* is a secret-adjacent pointer and lives in .env
-    # (VERTEX_CREDENTIALS_PATH / GOOGLE_APPLICATION_CREDENTIALS); these two
-    # settings are non-secret routing config and live here. Both are bridged to
-    # the VERTEX_PROJECT_ID / VERTEX_REGION env vars the adapter reads, so an
-    # explicit env var still wins over config.yaml.
-    "vertex": {
-        # GCP project ID. Empty → use the project_id embedded in the service
-        # account JSON (or ADC-resolved project).
-        "project_id": "",
-        # Vertex region. "global" is required for the Gemini 3.x preview models
-        # (regional endpoints silently 404 them). Override to a regional value
-        # (e.g. "us-central1") only if your models are pinned to a region.
-        "region": "global",
-    },
 
     # Config schema version - bump this when adding new required fields
     "_config_version": 33,
