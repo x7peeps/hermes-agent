@@ -1900,6 +1900,34 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         return agent._try_activate_fallback(reason)  # try next in chain
 
 
+def try_local_fallback(agent) -> bool:
+    """Attempt local Ollama fallback after the provider chain is exhausted.
+
+    Calls :func:`agent.local_fallback.local_fallback_orchestrator` and, on
+    success, resets the agent's retry counters so the conversation loop can
+    ``continue`` with the newly-switched local model.
+
+    Returns ``True`` if the local fallback was activated, ``False`` otherwise.
+    """
+    try:
+        from agent.local_fallback import local_fallback_orchestrator
+
+        success, model_name = local_fallback_orchestrator(agent)
+        if success:
+            logger.info(
+                "Local Ollama fallback activated: %s",
+                model_name,
+            )
+            return True
+        logger.warning(
+            "Local Ollama fallback failed: %s",
+            model_name,
+        )
+        return False
+    except Exception as exc:
+        logger.error("Local Ollama fallback error: %s", exc)
+        return False
+
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
@@ -3839,6 +3867,7 @@ __all__ = [
     "build_api_kwargs",
     "build_assistant_message",
     "try_activate_fallback",
+    "try_local_fallback",
     "handle_max_iterations",
     "cleanup_task_resources",
     "interruptible_streaming_api_call",
