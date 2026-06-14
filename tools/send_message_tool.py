@@ -1700,6 +1700,40 @@ async def _send_bluebubbles(extra, chat_id, message):
         return _error(f"BlueBubbles send failed: {e}")
 
 
+async def _send_interactive_card(*, adapter, chat_id, payload, thread_id=None):
+    """Send an Interactive Card via Feishu adapter's raw send method."""
+    from gateway.platforms.base import SendResult
+    import uuid
+
+    try:
+        from lark_oapi.api.im.v1.model import CreateMessageRequest, CreateMessageRequestBody
+
+        body = CreateMessageRequestBody.builder() \
+            .receive_id(chat_id) \
+            .msg_type("interactive") \
+            .content(payload) \
+            .uuid(str(uuid.uuid4())) \
+            .build()
+        request = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(body) \
+            .build()
+        import asyncio
+        response = await asyncio.to_thread(adapter._client.im.v1.message.create, request)
+    except Exception as e:
+        return SendResult(success=False, error=str(e))
+
+    succeeded = bool(response and getattr(response, "success", lambda: False)())
+    if not succeeded:
+        code = getattr(response, "code", "?")
+        msg = getattr(response, "msg", "?")
+        return SendResult(success=False, error=f"Feishu API error code={code}: {msg}")
+
+    data = getattr(response, "data", None)
+    message_id = getattr(data, "message_id", None) if data else None
+    return SendResult(success=True, message_id=message_id)
+
+
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via Feishu/Lark using the adapter's send pipeline."""
     try:
@@ -1721,7 +1755,19 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
 
         last_result = None
         if message.strip():
-            last_result = await adapter.send(chat_id, message, metadata=metadata)
+            # Tables must be sent as Interactive Cards, not plain text/post.
+            from gateway.platforms.feishu import _MARKDOWN_TABLE_RE, _build_table_card_payload
+            stripped = message.strip()
+            if _MARKDOWN_TABLE_RE.search(stripped):
+                payload = _build_table_card_payload(stripped)
+                last_result = await _send_interactive_card(
+                    adapter=adapter,
+                    chat_id=chat_id,
+                    payload=payload,
+                    thread_id=thread_id,
+                )
+            else:
+                last_result = await adapter.send(chat_id, message, metadata=metadata)
             if not last_result.success:
                 return _error(f"Feishu send failed: {last_result.error}")
 
