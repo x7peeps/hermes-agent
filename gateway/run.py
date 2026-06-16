@@ -692,6 +692,32 @@ def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool
     return bool(channel_prompt and _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER in channel_prompt)
 
 
+def _flatten_observed_content(content: Any) -> str:
+    """Flatten a multimodal parts list to plain text for observed-context assembly.
+
+    Observed group turns are replayed as a text-only prefix, so multimodal
+    content (images, audio, video) must be replaced with short placeholders
+    instead of being ``str()``-ed into a useless Python repr string.
+
+    See https://github.com/NousResearch/hermes-agent/issues/47415
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(item.get("text", "").strip())
+                else:
+                    # image_url, input_audio, video_url, etc.
+                    parts.append(f"[{item['type'].replace('_', ' ')} attachment]")
+            else:
+                parts.append(str(item).strip())
+        return " ".join(p for p in parts if p)
+    return str(content).strip()
+
+
 def _build_gateway_agent_history(
     history: List[Dict[str, Any]],
     *,
@@ -726,7 +752,7 @@ def _build_gateway_agent_history(
 
         content = msg.get("content")
         if separate_observed_context and msg.get("observed") and role == "user" and content:
-            observed_group_context.append(str(content).strip())
+            observed_group_context.append(_flatten_observed_content(content))
             continue
 
         # Rich agent messages (tool_calls, tool results) must be passed through
