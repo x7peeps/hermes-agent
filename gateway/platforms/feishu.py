@@ -92,6 +92,9 @@ try:
         CreateFileRequestBody,
         CreateImageRequest,
         CreateImageRequestBody,
+        ListMessageRequest,
+        ListMessageResponse,
+        ListMessageResponseBody,
         CreateMessageRequest,
         CreateMessageRequestBody,
         GetChatRequest,
@@ -4021,6 +4024,168 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug("[Feishu] Failed to fetch bot names for %s", bot_ids, exc_info=True)
             return None
+
+    # ------------------------------------------------------------------
+    # Context verification — external history lookup
+    # ------------------------------------------------------------------
+    # Uses the Feishu ``GET /open-apis/im/v1/messages`` (list) and
+    # ``GET /open-apis/im/v1/messages/{id}`` (single) APIs to verify
+    # that the agent's internal session state matches the platform's
+    # ground truth.  This is the last-mile circuit breaker before the
+    # gateway sends a response.
+
+    async def fetch_recent_messages(
+        self,
+        chat_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        limit: int = 3,
+        before_message_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent messages from a Feishu chat for context verification.
+
+        Uses ``message.get`` when *before_message_id* is provided (single
+        message lookup — precise), or ``messages.list`` otherwise (most
+        recent *limit* messages).
+
+        *start_time* and *end_time* set time-range bounds (ISO 8601 or
+        millisecond epoch).  Useful for Tier 3 reconciliation where the
+        caller wants messages within a specific window.
+
+        Returns a list of message dicts with ``id``, ``text``,
+        ``sender_id``, ``msg_type``, ``timestamp``, ``thread_id``, and
+        ``parent_id``.
+        """
+        if not self._client:
+            return []
+
+        try:
+            if before_message_id:
+                return await self._fetch_single_message(before_message_id)
+            return await self._fetch_message_list(
+                chat_id, thread_id, limit,
+                start_time=start_time, end_time=end_time,
+            )
+        except Exception:
+            logger.warning(
+                "[Feishu] Failed to fetch recent messages for chat %s",
+                chat_id, exc_info=True,
+            )
+            return []
+
+    async def _fetch_single_message(
+        self, message_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Look up a single message by its platform message_id."""
+        request = self._build_get_message_request(message_id)
+        response = await asyncio.to_thread(
+            self._client.im.v1.message.get, request,
+        )
+        if not response or not getattr(response, "success", lambda: False)():
+            logger.warning(
+                "[Feishu] fetch_recent_messages: message.get %s failed "
+                "(code=%s, msg=%s)",
+                message_id,
+                getattr(response, "code", "unknown"),
+                getattr(response, "msg", ""),
+            )
+            return []
+
+        items = getattr(getattr(response, "data", None), "items", None) or []
+        if not items:
+            return []
+        return [self._feishu_message_to_dict(items[0])]
+
+    async def _fetch_message_list(
+        self,
+        chat_id: str,
+        thread_id: Optional[str] = None,
+        limit: int = 3,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch the most recent *limit* messages from a chat or thread.
+
+        Args:
+            chat_id: Feishu chat (container) ID.
+            thread_id: Optional thread ID filter.
+            limit: Max messages to return.
+            start_time: Optional ISO 8601 or millisecond-epoch start bound.
+            end_time: Optional ISO 8601 or millisecond-epoch end bound.
+        """
+        builder = ListMessageRequest.builder()
+        builder.container_id_type("chat")
+        builder.container_id(chat_id)
+        # Use a sufficiently large page_size; the API caps internally.
+        builder.page_size(max(limit, 20))
+        builder.sort_type("ByCreateTimeDesc")
+        # Optional time-range bounds for context reconciliation.
+        if start_time is not None:
+            builder.start_time(str(start_time))
+        if end_time is not None:
+            builder.end_time(str(end_time))
+
+        request = builder.build()
+        response = await asyncio.to_thread(
+            self._client.im.v1.message.list, request,
+        )
+        if not response or not getattr(response, "success", lambda: False)():
+            logger.warning(
+                "[Feishu] fetch_recent_messages: messages.list failed "
+                "(code=%s, msg=%s)",
+                getattr(response, "code", "unknown"),
+                getattr(response, "msg", ""),
+            )
+            return []
+
+        data = getattr(response, "data", None)
+        if not data:
+            return []
+
+        items = getattr(data, "items", None) or []
+        results = []
+        for msg in items:
+            if len(results) >= limit:
+                break
+            # Optional thread_id filter: only include messages from the
+            # same thread when thread_id is given.
+            if thread_id:
+                msg_thread_id = getattr(msg, "thread_id", "") or ""
+                if msg_thread_id != thread_id:
+                    continue
+            results.append(self._feishu_message_to_dict(msg))
+        return results
+
+    def _feishu_message_to_dict(self, msg: Any) -> Dict[str, Any]:
+        """Convert a Feishu ``Message`` SDK object to a standard dict."""
+        body = getattr(msg, "body", None)
+        raw_content = getattr(body, "content", "") if body else ""
+        msg_type = getattr(msg, "msg_type", "") or ""
+        mentions = getattr(msg, "mentions", None)
+        text = self._extract_text_from_raw_content(
+            msg_type=msg_type,
+            raw_content=raw_content,
+            mentions=mentions,
+        )
+        sender = getattr(msg, "sender", None)
+        sender_id = (
+            getattr(sender, "id", None)
+            or getattr(sender, "open_id", None)
+            or getattr(sender, "user_id", None)
+            if sender else None
+        )
+        return {
+            "id": getattr(msg, "message_id", "") or "",
+            "text": text or "",
+            "sender_id": str(sender_id) if sender_id else None,
+            "chat_id": getattr(msg, "chat_id", "") or "",
+            "msg_type": msg_type,
+            "timestamp": getattr(msg, "create_time", "") or "",
+            "thread_id": getattr(msg, "thread_id", "") or "",
+            "parent_id": getattr(msg, "parent_id", "") or "",
+        }
 
     async def _fetch_message_text(self, message_id: str) -> Optional[str]:
         if not self._client or not message_id:

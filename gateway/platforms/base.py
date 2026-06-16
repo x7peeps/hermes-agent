@@ -18,6 +18,7 @@ import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import deque
 from urllib.parse import urlsplit
 
 from utils import normalize_proxy_url
@@ -1849,6 +1850,7 @@ class BasePlatformAdapter(ABC):
         # a newer task's guard, leaving stale busy state.
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
+        self._pending_queues: Dict[str, deque] = {}
         self._session_tasks: Dict[str, asyncio.Task] = {}
         # Legacy busy_text_mode env var; when unset the runner syncs the
         # resolved value (driven by busy_input_mode) onto the adapter after
@@ -2019,6 +2021,65 @@ class BasePlatformAdapter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement send_draft"
         )
+
+    # ------------------------------------------------------------------
+    # Context verification — external platform history lookup
+    # ------------------------------------------------------------------
+    # Adapters that can query the platform's own message history should
+    # override ``fetch_recent_messages``.  The gateway uses this as a
+    # last-mile circuit breaker: before sending the agent's response, it
+    # double-checks that the user's triggering message actually exists on
+    # the platform (i.e. our session state matches reality).
+    #
+    # Three tiers (configurable via ``context_verification.strict_mode``):
+    #
+    #   Tier 1 (message_id match)   — default.  Look up the specific
+    #       triggering message by its platform message_id and verify it
+    #       exists.  Fast, cheap, catches the most common drift scenarios.
+    #
+    #   Tier 2 (history alignment)  — fetch the N most recent messages
+    #       in the chat/thread and cross-reference with the last N turns
+    #       in Hermes' transcript.  Detects silently dropped/merged turns.
+    #
+    #   Tier 3 (full reconciliation) — when mismatches are found, walk
+    #       back and rebuild session state from the platform's ground
+    #       truth (e.g. re-queue missed turns, refresh transcript).
+    #       Only enabled in ``strict_mode: true``.
+
+    async def fetch_recent_messages(
+        self,
+        chat_id: str,
+        *,
+        thread_id: Optional[str] = None,
+        limit: int = 3,
+        before_message_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent messages from a chat for context verification.
+
+        Returns a list of message dicts with at minimum:
+          - ``"id"``: str — platform message ID
+          - ``"text"``: Optional[str] — plaintext content
+          - ``"sender_id"``: Optional[str]
+          - ``"timestamp"``: Optional[str]
+
+        When ``before_message_id`` is provided and the platform supports
+        single-message lookup, the adapter should use that (it is more
+        precise).  Otherwise fall back to the most recent *limit* messages.
+
+        *start_time* and *end_time* are optional time-range bounds (the
+        interpretation depends on the platform — Feishu uses millisecond
+        epoch, Telegram uses Unix timestamp, etc.).
+
+        Default returns an empty list, meaning context verification is
+        not supported on this platform.  Override in platform-specific
+        adapters that can query their own message history (Feishu,
+        Telegram, Discord, Slack, etc.).
+
+        .. versionadded:: 0.17.0
+        """
+        return []
 
     # ── Structured stream-event rendering ────────────────────────────────
     #

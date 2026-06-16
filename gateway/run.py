@@ -3173,29 +3173,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # process to pick up.  "interrupt" mode drops them (current behaviour).
         return self._restart_requested and self._busy_input_mode in {"queue", "steer"}
 
-    # -------- /queue FIFO helpers --------------------------------------
-    # /queue must produce one full agent turn per invocation, in FIFO
-    # order, with no merging.  The adapter's _pending_messages dict is a
-    # single "next-up" slot (shared with photo-burst follow-ups), so we
-    # use it for the head of the queue and an overflow list for the
-    # tail.  Enqueue puts new items in the slot when free, otherwise in
-    # the overflow.  Promotion (called after each run's drain) moves the
-    # next overflow item into the slot so the following recursion picks
-    # it up.  Clearing happens on /new and /reset via
-    # _handle_reset_command.
+    # -------- FIFO queue helpers ------------------------------------------
+    # All inbound messages that arrive while an agent is actively running
+    # are enqueued via _enqueue_fifo, which maintains per-session FIFO
+    # ordering with a single-slot fast path (adapter._pending_messages)
+    # and an overflow list (self._queued_events) for backpressure.
+    #
+    # Enqueue semantics:
+    #   - Fast slot empty  => occupy immediately
+    #   - Fast slot occupied, same session, merge-compatible
+    #     (text+text or photo+photo or same-sender burst) => merge
+    #   - Fast slot occupied, can't merge => append to overflow tail
+    #
+    # Dequeue (drain):
+    #   After each agent turn, the drain site pops the fast slot, then
+    #   _promote_queued_event moves the overflow head into the slot,
+    #   cascading into the next turn recursion.
+    #
+    # Clearing on /new, /reset, /stop via
+    # adapter._pending_messages.pop() + self._queued_events.pop().
 
     def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
-        """Append a /queue event to the FIFO chain for a session."""
+        """Enqueue a message for FIFO processing after the current turn."""
         if adapter is None:
             return
         pending_slot = getattr(adapter, "_pending_messages", None)
         if pending_slot is None:
             return
-        queued_events = getattr(self, "_queued_events", None)
-        if queued_events is None:
-            queued_events = {}
-            self._queued_events = queued_events
-        if session_key in pending_slot:
+        existing = pending_slot.get(session_key)
+        if existing is not None:
+            # Try to merge (text burst, photo burst, same sender)
+            if self._can_merge_pending(existing, queued_event):
+                merge_pending_message_event(
+                    pending_slot, session_key, queued_event,
+                    merge_text=(
+                        getattr(existing, "message_type", None) == MessageType.TEXT
+                        and getattr(queued_event, "message_type", None) == MessageType.TEXT
+                    ),
+                )
+                return
+            # Can't merge -- push to overflow
+            queued_events = getattr(self, "_queued_events", None)
+            if queued_events is None:
+                queued_events = {}
+                self._queued_events = queued_events
             queued_events.setdefault(session_key, []).append(queued_event)
         else:
             pending_slot[session_key] = queued_event
@@ -8214,6 +8235,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source.chat_id or "unknown", _msg_preview,
         )
 
+        # Read context_verification config once per turn
+        _ctx_verify_cfg = {}
+        try:
+            _ctx_raw = _load_gateway_config()
+            _ctx_verify_cfg = _ctx_raw.get("context_verification", {}) or {}
+        except Exception:
+            pass
+        _ctx_verify_enabled = bool(_ctx_verify_cfg.get("enabled", False))
+        _ctx_verify_strict = bool(_ctx_verify_cfg.get("strict_mode", False))
+        _ctx_verify_timeout = float(
+            _ctx_verify_cfg.get("timeout", 5.0)
+        )
+        _platform_key = _platform_config_key(source.platform)
+        _ctx_verify_platforms = _ctx_verify_cfg.get("platforms", {}) or {}
+        if isinstance(_ctx_verify_platforms, dict):
+            _ctx_verify_for_platform = _ctx_verify_platforms.get(
+                _platform_key, _ctx_verify_enabled
+            )
+        else:
+            _ctx_verify_for_platform = _ctx_verify_enabled
+
         # Get or create session
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's
         # last-active topic so a cross-topic Reply or stripped plain reply
@@ -9314,6 +9356,93 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
+
+            # ── Context verification (Tier 1: message_id match) ────────
+            # Before sending the agent's response, verify that the user's
+            # triggering message actually exists on the platform.  This
+            # catches cases where the internal session state drifted from
+            # the platform's ground truth (e.g. queued/interrupted messages
+            # caused a context misalignment).
+            #
+            # Controlled by ``context_verification`` in config.yaml:
+            #   enabled: true      — enable verification (default false)
+            #   strict_mode: true  — block the response on mismatch
+            #   timeout: 5.0       — API timeout for platform queries
+            #   platforms:         — per-platform overrides
+            #     feishu: true
+            _must_verify = (
+                _ctx_verify_for_platform
+                and response
+                and event.message_id
+                and not _is_internal
+            )
+            if _must_verify:
+                _verify_adapter = self.adapters.get(source.platform)
+                if _verify_adapter and hasattr(_verify_adapter, "fetch_recent_messages"):
+                    try:
+                        _verify_recent = await asyncio.wait_for(
+                            _verify_adapter.fetch_recent_messages(
+                                chat_id=source.chat_id,
+                                thread_id=source.thread_id,
+                                limit=1,
+                                before_message_id=str(event.message_id),
+                            ),
+                            timeout=_ctx_verify_timeout,
+                        )
+                        if _verify_recent:
+                            _found = any(
+                                msg.get("id") == str(event.message_id)
+                                for msg in _verify_recent
+                            )
+                            if not _found:
+                                _ctx_log_extra = (
+                                    f"recent_ids={[m.get('id') for m in _verify_recent]}"
+                                )
+                                logger.error(
+                                    "CONTEXT VERIFICATION: message %s not found "
+                                    "in platform history. session=%s, chat=%s, "
+                                    "platform=%s, %s. strict=%s",
+                                    event.message_id, session_key,
+                                    source.chat_id, source.platform.value,
+                                    _ctx_log_extra, _ctx_verify_strict,
+                                )
+                                if _ctx_verify_strict:
+                                    response = (
+                                        "⚠️ 上下文校验失败：内部状态与飞书消息记录不一致，"
+                                        "我已自动取消本次回复。请重新发送消息。\n\n"
+                                        "⚠️ Context verification failed: session state "
+                                        "does not match platform history. "
+                                        "Please re-send your message."
+                                    )
+                                else:
+                                    # Non-strict: log warning but let response through
+                                    logger.warning(
+                                        "CONTEXT VERIFICATION WARNING: potential context "
+                                        "drift for session %s (non-strict mode — response "
+                                        "sent anyway)",
+                                        session_key,
+                                    )
+                        else:
+                            # fetch_recent_messages returned empty for this
+                            # message_id — platform may have deleted the
+                            # message, or it expired.  Log and continue.
+                            logger.warning(
+                                "Context verification: message %s not found "
+                                "on platform (may have been deleted or expired). "
+                                "session=%s",
+                                event.message_id, session_key,
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Context verification timed out for session %s "
+                            "(timeout=%.1fs) — response sent anyway",
+                            session_key, _ctx_verify_timeout,
+                        )
+                    except Exception as _ctx_err:
+                        logger.debug(
+                            "Context verification failed (non-fatal): %s",
+                            _ctx_err,
+                        )
 
             return response
             
@@ -15706,6 +15835,70 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # order, and (b) causes any mid-chain /queue to correctly
                 # route to overflow rather than jumping the queue.
                 pending_event = self._promote_queued_event(session_key, adapter, pending_event)
+
+                # ── Tier 3: Context reconciliation ────────────────────
+                # When context_verification is enabled and we have a
+                # pending_event with a message_id, cross-reference it
+                # against the platform's recent history.  If the message
+                # has been superseded by newer messages from the same
+                # sender, the internal queue order has drifted from the
+                # platform's reality — refresh by fetching the most recent
+                # user message instead.
+                if (
+                    _ctx_verify_for_platform
+                    and pending_event
+                    and pending_event.text
+                    and hasattr(adapter, "fetch_recent_messages")
+                ):
+                    try:
+                        _recent = await asyncio.wait_for(
+                            adapter.fetch_recent_messages(
+                                chat_id=source.chat_id,
+                                thread_id=source.thread_id,
+                                limit=3,
+                            ),
+                            timeout=_ctx_verify_timeout,
+                        )
+                        if _recent and pending_event.message_id:
+                            _event_in_history = any(
+                                msg.get("id") == str(pending_event.message_id)
+                                for msg in _recent
+                            )
+                            if not _event_in_history:
+                                # The queued message is no longer the most
+                                # recent — the platform may have more current
+                                # context.  Try to find a newer message from
+                                # the same sender and use that instead.
+                                _latest_user_msg = None
+                                for msg in _recent:
+                                    if msg.get("text") and msg.get("sender_id"):
+                                        if msg["sender_id"] == source.user_id:
+                                            _latest_user_msg = msg
+                                            break
+                                if _latest_user_msg and _latest_user_msg.get("id") != str(pending_event.message_id):
+                                    logger.info(
+                                        "Tier 3 reconciliation: pending message %s "
+                                        "not in recent history for session %s. "
+                                        "Using latest user message %s instead.",
+                                        pending_event.message_id, session_key,
+                                        _latest_user_msg["id"],
+                                    )
+                                    # Create a synthetic event with the newer text
+                                    from dataclasses import replace as _dc_replace
+                                    pending_event = _dc_replace(
+                                        pending_event,
+                                        text=_latest_user_msg["text"],
+                                        message_id=_latest_user_msg["id"],
+                                    )
+                    except asyncio.TimeoutError:
+                        logger.debug(
+                            "Tier 3 reconciliation timed out for session %s",
+                            session_key,
+                        )
+                    except Exception as _t3_err:
+                        logger.debug(
+                            "Tier 3 reconciliation failed: %s", _t3_err,
+                        )
                 if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):

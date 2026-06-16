@@ -37,7 +37,7 @@ needs to replace the import + call site:
 """
 
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Dict
 
 # Sentinel to distinguish "never set in this context" from "explicitly set to empty".
 # When a contextvar holds _UNSET, we fall back to os.environ (CLI/cron compat).
@@ -195,3 +195,53 @@ def get_session_env(name: str, default: str = "") -> str:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
     return os.getenv(name, default)
+
+
+# ---------------------------------------------------------------------------
+# Context snapshot for safe session switching
+# ---------------------------------------------------------------------------
+# When multiple messages are queued for the same session (FIFO drain),
+# each turn must run with its own isolated contextvars so that tool
+# calls see the correct platform/chat/thread IDs.
+#
+#   snapshot_session_context()  -> dict   (save current state)
+#   restore_session_context(dict)        (restore from snapshot)
+#
+# Usage in run.py FIFO drain:
+#
+#   ctx_snap = snapshot_session_context()
+#   try:
+#       restore_session_context(next_turn_ctx)
+#       ... agent run ...
+#   finally:
+#       restore_session_context(ctx_snap)
+
+
+def snapshot_session_context() -> Dict[str, str]:
+    """Capture the current session contextvars into a dict.
+
+    Returns a dict mapping ``HERMES_SESSION_*`` names to their current
+    values (or ``\"\"`` if never set).  Use with
+    :func:`restore_session_context` to save/restore the entire session
+    state across async task boundaries.
+
+    .. versionadded:: 0.17.0
+    """
+    result: Dict[str, str] = {}
+    for name, var in _VAR_MAP.items():
+        value = var.get()
+        result[name] = "" if value is _UNSET else value
+    return result
+
+
+def restore_session_context(snapshot: Dict[str, str]) -> None:
+    """Restore session contextvars from a snapshot dict.
+
+    Sets every var in ``_VAR_MAP`` to the value from *snapshot* (or
+    ``\"\"`` if missing).  This is an unconditional overwrite — the
+    caller is responsible for providing the correct snapshot.
+
+    .. versionadded:: 0.17.0
+    """
+    for name, var in _VAR_MAP.items():
+        var.set(snapshot.get(name, ""))
