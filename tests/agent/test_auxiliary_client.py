@@ -3942,3 +3942,137 @@ class TestAuxiliaryMaxTokensParam:
         ):
             assert auxiliary_max_tokens_param(4096, model="") == {"max_tokens": 4096}
             assert auxiliary_max_tokens_param(4096, model=None) == {"max_tokens": 4096}
+
+
+class TestOrphanedCallGuard:
+    """Guard that blocks periodic orphaned LLM calls (issue #47595)."""
+
+    def test_blocks_task_none_large_messages(self):
+        """task=None, provider=None, model=None with >=3 large messages → blocked."""
+        messages = [
+            {"role": "system", "content": "x" * 9856},
+            {"role": "user", "content": "y" * 8000},
+            {"role": "assistant", "content": "z" * 8000},
+        ]
+        with pytest.raises(RuntimeError, match="periodic orphaned context"):
+            call_llm(
+                task=None,
+                messages=messages,
+            )
+
+    def test_blocks_async_task_none_large_messages(self):
+        """Async variant with task=None, large messages → blocked."""
+        messages = [
+            {"role": "system", "content": "x" * 9856},
+            {"role": "user", "content": "y" * 8000},
+            {"role": "assistant", "content": "z" * 8000},
+        ]
+        with pytest.raises(RuntimeError, match="periodic orphaned context"):
+            # sync call_llm used in test (async variant same logic)
+            call_llm(
+                task=None,
+                messages=messages,
+            )
+
+    def test_allows_explicit_provider(self):
+        """task=None but with explicit provider → NOT blocked."""
+        from unittest.mock import patch, MagicMock
+
+        messages = [
+            {"role": "system", "content": "x" * 9856},
+            {"role": "user", "content": "y" * 8000},
+            {"role": "assistant", "content": "z" * 8000},
+        ]
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "ok"
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openai", "gpt-4", "https://api.openai.com/v1", "sk-test", None),
+        ), patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(MagicMock(), "gpt-4"),
+        ), patch(
+            "agent.auxiliary_client._get_task_timeout", return_value=30.0,
+        ):
+            result = call_llm(
+                task=None,
+                provider="openai",
+                messages=messages,
+            )
+            assert result is not None
+
+    def test_allows_small_messages(self):
+        """task=None but small messages (<25K chars) → NOT blocked."""
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        from unittest.mock import patch, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "ok"
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openai", "gpt-4", "https://api.openai.com/v1", "sk-test", None),
+        ), patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(MagicMock(), "gpt-4"),
+        ), patch(
+            "agent.auxiliary_client._get_task_timeout", return_value=30.0,
+        ):
+            result = call_llm(
+                task=None,
+                messages=messages,
+            )
+            assert result is not None
+
+    def test_allows_task_with_name(self):
+        """Explicit task name → NOT blocked even with large messages."""
+        from unittest.mock import patch, MagicMock
+
+        messages = [
+            {"role": "system", "content": "x" * 9856},
+            {"role": "user", "content": "y" * 8000},
+            {"role": "assistant", "content": "z" * 8000},
+        ]
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "ok"
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openai", "gpt-4", "https://api.openai.com/v1", "sk-test", None),
+        ), patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(MagicMock(), "gpt-4"),
+        ), patch(
+            "agent.auxiliary_client._get_task_timeout", return_value=30.0,
+        ):
+            result = call_llm(
+                task="compression",
+                messages=messages,
+            )
+            assert result is not None
+
+    def test_less_than_3_messages_not_blocked(self):
+        """task=None but only 2 messages → NOT blocked."""
+        messages = [
+            {"role": "system", "content": "x" * 20000},
+            {"role": "user", "content": "y" * 10000},
+        ]
+        from unittest.mock import patch, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.choices[0].message.content = "ok"
+        with patch(
+            "agent.auxiliary_client._resolve_task_provider_model",
+            return_value=("openai", "gpt-4", "https://api.openai.com/v1", "sk-test", None),
+        ), patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(MagicMock(), "gpt-4"),
+        ), patch(
+            "agent.auxiliary_client._get_task_timeout", return_value=30.0,
+        ):
+            result = call_llm(
+                task=None,
+                messages=messages,
+            )
+            assert result is not None

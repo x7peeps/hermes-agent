@@ -5204,6 +5204,26 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    # Guard: detect and block periodic orphaned calls with no task context
+    # and accumulating conversation payload.  (issue #47595)
+    if task is None and provider is None and model is None:
+        if messages and len(messages) >= 3:
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            if 25000 < total_chars < 500000:
+                logger.warning(
+                    "Blocked suspicious LLM call (task=None, no explicit provider/model): "
+                    "~%d chars across %d messages. "
+                    "This prevents periodic waste identified in issue #47595. "
+                    "Check callers for unintended loop/accumulation.",
+                    total_chars, len(messages),
+                )
+                raise RuntimeError(
+                    f"Blocked LLM call with task=None, no explicit provider/model, "
+                    f"~{total_chars} chars across {len(messages)} messages. "
+                    f"This resembles periodic orphaned context (issue #47595). "
+                    f"Set an explicit task= or provider= to suppress this guard."
+                )
+
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -5713,6 +5733,26 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    # Guard: detect and block periodic orphaned calls with no task context
+    # and accumulating conversation payload.  (issue #47595)
+    if task is None and provider is None and model is None:
+        if messages and len(messages) >= 3:
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            if 25000 < total_chars < 500000:
+                logger.warning(
+                    "Blocked suspicious async LLM call (task=None, no explicit provider/model): "
+                    "~%d chars across %d messages. "
+                    "This prevents periodic waste identified in issue #47595. "
+                    "Check callers for unintended loop/accumulation.",
+                    total_chars, len(messages),
+                )
+                raise RuntimeError(
+                    f"Blocked async LLM call with task=None, no explicit provider/model, "
+                    f"~{total_chars} chars across {len(messages)} messages. "
+                    f"This resembles periodic orphaned context (issue #47595). "
+                    f"Set an explicit task= or provider= to suppress this guard."
+                )
+
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
