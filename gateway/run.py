@@ -17871,6 +17871,13 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0
     while not stop_event.is_set():
+        try:
+            cron_tick(verbose=False, adapters=adapters, loop=loop, sync=False)
+        except BaseException as e:
+            # catch BaseException so provider SDK SystemExit (raised after
+            # retry exhaustion) does not crash the entire gateway process
+            logger.error("Cron tick error: %s: %s", type(e).__name__, e)
+
         tick_count += 1
 
         if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:
