@@ -1874,7 +1874,40 @@ def resolve_runtime_provider(
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        creds = resolve_api_key_provider_credentials(provider)
+        try:
+            creds = resolve_api_key_provider_credentials(provider)
+        except AuthError:
+            creds = {"api_key": ""}
+        if not creds.get("api_key", "").strip():
+            # If the API-key variant has no credentials, check whether an
+            # OAuth variant is configured and use that instead.  This handles
+            # the case where a user sets fallback_providers to "Grok" (which
+            # resolves to "xai", the API-key variant) but has only xai-oauth
+            # credentials set up.  Without this OAuth fallback, the resolution
+            # fails with an AuthError and the fallback chain skips this entry
+            # (fix #54671).
+            _OAUTH_ALIAS = {"xai": "xai-oauth", "minimax": "minimax-oauth"}
+            oauth_target = _OAUTH_ALIAS.get(provider)
+            if oauth_target and oauth_target in PROVIDER_REGISTRY:
+                oconfig = PROVIDER_REGISTRY[oauth_target]
+                if oconfig.auth_type in {"oauth_external", "oauth_codex", "oauth_minimax"}:
+                    # Re-resolve using the OAuth provider name.  The existing
+                    # provider-specific branches (xai-oauth, minimax-oauth, etc.)
+                    # handle credential resolution and api_mode correctly.
+                    oauth_runtime = resolve_runtime_provider(
+                        requested=oauth_target,
+                        target_model=target_model,
+                    )
+                    if oauth_runtime.get("api_key"):
+                        return oauth_runtime
+            # No OAuth fallback available — raise the original error.
+            raise AuthError(
+                f"API key not found for provider '{provider}'. "
+                f"Set {pconfig.api_key_env_vars} in your environment, "
+                f"or configure the OAuth variant ({oauth_target or 'N/A'}).",
+                provider=provider,
+                code="missing_api_key",
+            )
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — mirrors the Anthropic path above.  Without
         # this, users who set model.base_url to e.g. api.minimaxi.com/anthropic

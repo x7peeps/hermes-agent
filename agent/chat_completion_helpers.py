@@ -1204,10 +1204,55 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # (not substring) — see GHSA-76xc-57q6-vm5m.
         if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
             fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+
+        # Map of API-key provider names to their OAuth-backed variants.
+        # When a fallback entry specifies an API-key provider name
+        # (e.g. "Grok" → "xai") but the user only has OAuth credentials
+        # (e.g. xai-oauth PKCE JWT), the initial resolve_provider_client
+        # call will fail because it looks for XAI_API_KEY in the environment.
+        # Detect this and try the OAuth variant before giving up.  The MoA
+        # subsystem handles this via _slot_runtime's resolved_provider check
+        # (moa_loop.py), but the general fallback chain (this function) has
+        # no equivalent — fix #54671.
+        _OAUTH_VARIANT_MAP = {
+            "xai": "xai-oauth",
+        }
+
+        # Try the primary (API-key) provider first.
         fb_client, _resolved_fb_model = resolve_provider_client(
             fb_provider, model=fb_model, raw_codex=True,
             explicit_base_url=fb_base_url_hint,
             explicit_api_key=fb_api_key_hint)
+
+        # If the primary resolution failed and the provider has an OAuth
+        # variant, try the OAuth path.  Only do this when no explicit API
+        # key was provided (meaning the user didn't deliberately configure
+        # an API key for this provider — if they did, honour that intent
+        # and report the key failure rather than silently routing to OAuth).
+        if fb_client is None and not fb_api_key_hint:
+            _effective_provider = fb_provider.strip().lower()
+            _oauth_target = _OAUTH_VARIANT_MAP.get(_effective_provider)
+            if (
+                _oauth_target
+                and _oauth_target != _effective_provider
+            ):
+                logger.debug(
+                    "Fallback %s: API-key variant has no credentials, "
+                    "trying OAuth variant %s",
+                    fb_provider, _oauth_target,
+                )
+                fb_client, _resolved_fb_model = resolve_provider_client(
+                    _oauth_target, model=fb_model, raw_codex=True,
+                    explicit_base_url=fb_base_url_hint,
+                    explicit_api_key=None,
+                )
+                if fb_client is not None:
+                    fb_provider = _oauth_target
+                    logger.info(
+                        "Fallback resolved via OAuth variant %s/%s",
+                        _oauth_target, fb_model,
+                    )
+
         if fb_client is None:
             logger.warning(
                 "Fallback to %s failed: provider not configured",
@@ -1227,7 +1272,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         fb_api_mode = "chat_completions"
         fb_base_url = str(fb_client.base_url)
         _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
-        if fb_provider == "openai-codex":
+        if fb_provider == "openai-codex" or fb_provider == "xai-oauth":
             fb_api_mode = "codex_responses"
         elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
             fb_api_mode = "anthropic_messages"
