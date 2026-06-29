@@ -4636,6 +4636,8 @@ def _run_with_idle_timeout(
     last_output_ts = _time.monotonic()
     lock = threading.Lock()
 
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -4647,6 +4649,7 @@ def _run_with_idle_timeout(
             errors="replace",
             bufsize=1,
             env=env,
+            creationflags=windows_hide_flags(),
         )
     except OSError as exc:
         # E.g. npm not on PATH between the which() check and now.
@@ -4770,7 +4773,7 @@ def _run_npm_install_deterministic(
 
     Prefers ``npm ci`` (strict, lockfile-preserving) when a lockfile is present;
     falls back to ``npm install`` only if ``npm ci`` fails (e.g. lockfile out of
-    sync on a WIP checkout).  Without this, ``npm install`` on npm ≥ 10 silently
+    sync on a WIP checkout).  Without this, ``npm install`` on npm >= 10 silently
     rewrites committed lockfiles (stripping ``"peer": true`` etc.), which leaves
     the working tree dirty and causes the next ``hermes update`` to stash the
     lockfile — repeatedly.
@@ -4779,6 +4782,8 @@ def _run_npm_install_deterministic(
     # --silent/capture_output). It no-ops when CI is set — same as the TUI
     # install path and nix/lib.nix npm ci hooks.
     run_env = {**os.environ, **(env or {}), "CI": "1"}
+
+    from hermes_cli._subprocess_compat import windows_hide_flags
 
     lockfile = cwd / "package-lock.json"
     if lockfile.exists():
@@ -4792,6 +4797,7 @@ def _run_npm_install_deterministic(
             encoding="utf-8",
             errors="replace",
             check=False,
+            creationflags=windows_hide_flags(),
         )
         if ci_result.returncode == 0:
             return ci_result
@@ -4807,6 +4813,7 @@ def _run_npm_install_deterministic(
         encoding="utf-8",
         errors="replace",
         check=False,
+        creationflags=windows_hide_flags(),
     )
 
 
@@ -5279,6 +5286,7 @@ def _redownload_electron_dist(
     installer = electron_dir / "install.js"
     if not installer.is_file():
         return False
+    from hermes_cli._subprocess_compat import windows_hide_flags
     from hermes_constants import find_node_executable, with_hermes_node_path
 
     node = find_node_executable("node")
@@ -5296,7 +5304,13 @@ def _redownload_electron_dist(
     if mirror:
         dl_env["ELECTRON_MIRROR"] = mirror
     try:
-        subprocess.run([node, str(installer)], cwd=str(electron_dir), env=dl_env, check=False)
+        subprocess.run(
+            [node, str(installer)],
+            cwd=str(electron_dir),
+            env=dl_env,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
     except OSError:
         return False
     return _electron_dist_ok(project_root)
@@ -5578,6 +5592,7 @@ def cmd_gui(args: argparse.Namespace):
     except Exception:
         pass
 
+    from hermes_cli._subprocess_compat import windows_hide_flags
     from hermes_constants import find_node_executable, with_hermes_node_path
 
     # with_hermes_node_path() copies os.environ when called with no arg.
@@ -5678,7 +5693,13 @@ def cmd_gui(args: argparse.Namespace):
                 stopped = _stop_desktop_processes_locking_build(desktop_dir)
                 if stopped:
                     print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
-            build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=env, check=False)
+            build_result = subprocess.run(
+                [npm, "run", build_script],
+                cwd=desktop_dir,
+                env=env,
+                check=False,
+                creationflags=windows_hide_flags(),
+            )
             if (
                 build_result.returncode != 0
                 and not source_mode
@@ -5705,7 +5726,13 @@ def cmd_gui(args: argparse.Namespace):
                     # The purge can't remove a win-unpacked tree whose Hermes.exe
                     # is still locked by a running instance; stop it before retry.
                     _stop_desktop_processes_locking_build(desktop_dir)
-                    build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=env, check=False)
+                    build_result = subprocess.run(
+                        [npm, "run", build_script],
+                        cwd=desktop_dir,
+                        env=env,
+                        check=False,
+                        creationflags=windows_hide_flags(),
+                    )
             if (
                 build_result.returncode != 0
                 and not source_mode
@@ -5721,7 +5748,13 @@ def cmd_gui(args: argparse.Namespace):
                 if not _electron_dist_ok(PROJECT_ROOT):
                     _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
                 _stop_desktop_processes_locking_build(desktop_dir)
-                build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=mirror_env, check=False)
+                build_result = subprocess.run(
+                    [npm, "run", build_script],
+                    cwd=desktop_dir,
+                    env=mirror_env,
+                    check=False,
+                    creationflags=windows_hide_flags(),
+                )
             if build_result.returncode != 0:
                 print("✗ Desktop GUI build failed")
                 print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
@@ -5763,7 +5796,13 @@ def cmd_gui(args: argparse.Namespace):
 
     if source_mode:
         print("→ Launching Hermes Desktop from source build...")
-        launch_result = subprocess.run([npm, "exec", "--", "electron", "."], cwd=desktop_dir, env=env, check=False)
+        launch_result = subprocess.run(
+            [npm, "exec", "--", "electron", "."],
+            cwd=desktop_dir,
+            env=env,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
         sys.exit(launch_result.returncode)
 
     if packaged_executable is None:
