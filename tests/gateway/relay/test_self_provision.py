@@ -221,7 +221,7 @@ def test_post_provision_body_includes_instanceId_only_when_set(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, size=-1):
             return json.dumps({"secret": "a" * 64, "deliveryKey": "b" * 64, "tenant": "t", "gatewayId": "gw-1"}).encode()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ANN001
@@ -314,7 +314,7 @@ def test_post_provision_body_includes_wakeUrl_only_when_set(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, size=-1):
             return json.dumps({"secret": "a" * 64, "deliveryKey": "b" * 64, "tenant": "t", "gatewayId": "gw-1"}).encode()
 
     def _fake_urlopen(req, timeout=None):  # noqa: ANN001

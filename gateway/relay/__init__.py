@@ -21,6 +21,11 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+# Provision responses are small control-plane JSON (secret, deliveryKey, tenant,
+# gatewayId — typically < 2 KB). Cap reads at 64 KB to guard against connector
+# bugs, proxy injection, or hostile endpoints.
+_MAX_PROVISION_BODY_BYTES = 65536
+
 
 def relay_url() -> Optional[str]:
     """The connector relay endpoint URL, or None when relay is not configured.
@@ -418,11 +423,13 @@ def _post_provision(
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
+            raw = resp.read(_MAX_PROVISION_BODY_BYTES)
+            payload = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = (json.loads(exc.read().decode()) or {}).get("error", "")
+            raw = exc.read(_MAX_PROVISION_BODY_BYTES)
+            detail = (json.loads(raw.decode("utf-8")) or {}).get("error", "")
         except Exception:
             pass
         raise RuntimeError(
