@@ -335,10 +335,13 @@ class WeComAdapter(BasePlatformAdapter):
     async def _listen_loop(self) -> None:
         """Read websocket events forever, reconnecting on errors."""
         backoff_idx = 0
+        consecutive_errors = 0
+        max_retries = 50
         while self._running:
             try:
                 await self._read_events()
                 backoff_idx = 0
+                consecutive_errors = 0
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -347,6 +350,19 @@ class WeComAdapter(BasePlatformAdapter):
                 logger.warning("[%s] WebSocket error: %s", self.name, exc)
                 self._fail_pending_responses(RuntimeError("WeCom connection interrupted"))
 
+                # Clear stale ws/session references so _read_events doesn't
+                # spin on the same closed socket next iteration.
+                await self._cleanup_ws()
+
+                consecutive_errors += 1
+                if consecutive_errors >= max_retries:
+                    self._set_fatal_error(
+                        "wecom_max_retries",
+                        f"WeCom adapter exceeded {max_retries} consecutive reconnection attempts",
+                        retryable=False,
+                    )
+                    return
+
                 delay = RECONNECT_BACKOFF[min(backoff_idx, len(RECONNECT_BACKOFF) - 1)]
                 backoff_idx += 1
                 await asyncio.sleep(delay)
@@ -354,6 +370,7 @@ class WeComAdapter(BasePlatformAdapter):
                 try:
                     await self._open_connection()
                     backoff_idx = 0
+                    consecutive_errors = 0
                     self._mark_connected()
                     logger.info("[%s] Reconnected", self.name)
                 except Exception as reconnect_exc:
@@ -372,6 +389,13 @@ class WeComAdapter(BasePlatformAdapter):
                     await self._dispatch_payload(payload)
             elif msg.type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSING}:
                 raise RuntimeError("WeCom websocket closed")
+
+        # If the while loop exited (ws.closed became True between condition
+        # check and receive(), or _open_connection() left a stale ref) but
+        # the adapter is still supposed to be running, raise so the caller
+        # doesn't reset backoff and busy-loop calling us again immediately.
+        if self._running:
+            raise RuntimeError("WeCom websocket connection lost (socket closed unexpectedly)")
 
     async def _heartbeat_loop(self) -> None:
         """Send lightweight application-level pings."""
