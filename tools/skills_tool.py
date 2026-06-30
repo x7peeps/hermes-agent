@@ -1281,6 +1281,16 @@ def skill_view(
                     ensure_ascii=False,
                 )
 
+            # ── Read-before-write invariant tracking ────────────────
+            # Record that this skill was viewed so the background review's
+            # read-before-write check in skill_manage() allows writes.
+            # Best-effort; failures never break the tool call.
+            try:
+                from tools.skill_manager_tool import mark_skill_viewed as _mark_viewed
+                _mark_viewed(name)
+            except Exception:
+                pass
+
             return json.dumps(
                 {
                     "success": True,
@@ -1505,6 +1515,16 @@ def skill_view(
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
+
+        # ── Read-before-write invariant tracking ────────────────
+        # Record that this skill was viewed so the background review's
+        # read-before-write check in skill_manage() allows writes.
+        # Best-effort; failures never break the tool call.
+        try:
+            from tools.skill_manager_tool import mark_skill_viewed as _mark_viewed
+            _mark_viewed(name)
+        except Exception:
+            pass
 
         return json.dumps(result, ensure_ascii=False)
 

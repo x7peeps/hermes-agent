@@ -893,6 +893,11 @@ class TestExternalSkillMutations:
 
         token = set_current_write_origin(BACKGROUND_REVIEW)
         try:
+            # Read-before-write invariant: mark the skill as viewed so the
+            # test can reach the external-skill guard.
+            from tools.skill_manager_tool import mark_skill_viewed
+            mark_skill_viewed("ext-skill")
+
             with _two_roots(local, external), patch(
                 "agent.skill_utils.get_external_skills_dirs",
                 return_value=[external.resolve()],
@@ -930,6 +935,9 @@ class TestExternalSkillMutations:
             _create_skill("my-skill", VALID_SKILL_CONTENT)
             token = set_current_write_origin(BACKGROUND_REVIEW)
             try:
+                from tools.skill_manager_tool import mark_skill_viewed
+                mark_skill_viewed("my-skill")
+
                 with patch("tools.skill_usage.get_record", side_effect=_fake_get_record):
                     raw = skill_manage(
                         action="patch",
@@ -957,6 +965,9 @@ class TestExternalSkillMutations:
             _create_skill("my-skill", VALID_SKILL_CONTENT)
             token = set_current_write_origin(BACKGROUND_REVIEW)
             try:
+                from tools.skill_manager_tool import mark_skill_viewed
+                mark_skill_viewed("my-skill")
+
                 with patch(
                     "tools.skill_usage.get_record",
                     side_effect=lambda n: {"pinned": False},

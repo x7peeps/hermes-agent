@@ -326,6 +326,36 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return None
+
+    # ── Read-before-write invariant ──────────────────────────────
+    # The background review fork MUST call skill_view(name=...) on a
+    # target skill BEFORE writing to it.  Without this, the model
+    # hallucinates existing content from the conversation transcript
+    # alone and silently deletes substantial portions of user-installed
+    # skills (issue #55647).
+    #
+    # Allow delete even without a prior view — the model needs to be
+    # able to prune stale skills.  Edit/patch/write_file/remove_file
+    # all mutate existing content and MUST be grounded.
+    try:
+        from tools.skill_provenance import is_background_review
+        if is_background_review() and action != "delete":
+            viewed = _skills_viewed_in_context.get()
+            if name not in viewed:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Read-before-write invariant violated: background "
+                        f"review attempted {action} on skill '{name}' without "
+                        f"calling skill_view('{name}') first.  The review fork "
+                        f"must read the existing skill end-to-end before "
+                        f"patching or editing it.  Call skill_view(name='{name}') "
+                        f"to view the current content, then retry the {action}."
+                    ),
+                }
+    except Exception:
+        pass
+
     return _background_review_write_guard(name, existing["path"], action)
 
 
@@ -1134,6 +1164,28 @@ import contextvars as _ctxvars
 _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
     "skill_gate_bypass", default=False
 )
+
+# Read-before-write invariant: track which skills have been viewed via skill_view
+# in the current context (thread).  The background review fork's model must call
+# skill_view() on a target skill BEFORE issuing any write action against it.
+# Without this, the fork hallucinates existing content and silently corrupts
+# user-installed skills (issue #55647).
+_skills_viewed_in_context: "_ctxvars.ContextVar[frozenset[str]]" = _ctxvars.ContextVar(
+    "_skills_viewed_in_context", default=frozenset()
+)
+
+
+def mark_skill_viewed(name: str) -> None:
+    """Record that *name* was viewed via skill_view in the current context.
+
+    Called by ``skills_tool.skill_view()`` on success.  The background
+    review's read-before-write check uses this set to refuse writes to
+    skills the fork hasn't read.
+    """
+    current = _skills_viewed_in_context.get()
+    if name in current:
+        return
+    _skills_viewed_in_context.set(current | {name})
 
 
 def _apply_skill_write_gate(action, name, **payload_kwargs):

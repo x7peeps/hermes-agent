@@ -168,10 +168,11 @@ _MEMORY_REVIEW_PROMPT = (
 )
 
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be "
-    "ACTIVE — most sessions produce at least one skill update, even if "
-    "small. A pass that does nothing is a missed learning opportunity, "
-    "not a neutral outcome.\n\n"
+    "Review the conversation above and consider whether the skill library "
+    "should be updated. A pass that does nothing is a VALID outcome — most "
+    "sessions do not produce durable new skill content. Only act when the "
+    "conversation produced a real, persistent improvement to HOW a class of "
+    "task should be handled.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a rich "
     "SKILL.md and a `references/` directory for session-specific detail. "
     "Not a long flat list of narrow one-session-one-skill entries. This "
@@ -266,10 +267,15 @@ _SKILL_REVIEW_PROMPT = (
     "command, config step, env var to set) under an existing setup or "
     "troubleshooting skill — never 'this tool does not work' as a "
     "standalone constraint.\n\n"
-    "'Nothing to save.' is a real option but should NOT be the "
-    "default. If the session ran smoothly with no corrections and "
-    "produced no new technique, just say 'Nothing to save.' and stop. "
-    "Otherwise, act."
+    "'Nothing to save.' is a valid outcome. If the session ran smoothly "
+    "with no corrections and produced no new technique, say 'Nothing to "
+    "save.' and stop. Otherwise, act.\n\n"
+    "IMPORTANT — read-before-write invariant: You MUST call "
+    "skill_view(name='<skill>') on a target skill BEFORE patching, "
+    "editing, or writing any file into it. The skill_manage tool "
+    "will enforce this at runtime — trying to patch a skill you "
+    "have not read first will be denied with an error. This prevents "
+    "silent content corruption from hallucinated skill content."
 )
 
 _COMBINED_REVIEW_PROMPT = (
@@ -278,9 +284,10 @@ _COMBINED_REVIEW_PROMPT = (
     "desires, preferences, personal details, or expectations about "
     "how you should behave? Save facts about the user and durable "
     "preferences with the memory tool.\n\n"
-    "**Skills**: how to do this class of task. Be ACTIVE — most "
-    "sessions produce at least one skill update. A pass that does "
-    "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
+    "**Skills**: how to do this class of task. A pass that does nothing "
+    "is a VALID outcome — most sessions do not produce durable new "
+    "skill content. Only act when the conversation produced a real, "
+    "persistent improvement to HOW a class of task should be handled.\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a rich "
     "SKILL.md and a `references/` directory for session-specific detail. "
     "Not a long flat list of narrow one-session-one-skill entries.\n\n"
@@ -354,7 +361,13 @@ _COMBINED_REVIEW_PROMPT = (
     "standalone constraint.\n\n"
     "Act on whichever of the two dimensions has real signal. If "
     "genuinely nothing stands out on either, say 'Nothing to save.' "
-    "and stop — but don't reach for that conclusion as a default."
+    "and stop — doing nothing is a valid outcome.\n\n"
+    "IMPORTANT — read-before-write invariant: You MUST call "
+    "skill_view(name='<skill>') on a target skill BEFORE patching, "
+    "editing, or writing any file into it. The skill_manage tool "
+    "will enforce this at runtime — trying to patch a skill you "
+    "have not read first will be denied with an error. This prevents "
+    "silent content corruption from hallucinated skill content."
 )
 
 
