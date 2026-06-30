@@ -1820,12 +1820,18 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         HEARTBEAT_INTERVAL = 90   # seconds between probes
         PROBE_TIMEOUT = 15        # seconds before declaring the path dead
+        # ``polling_task_done_count`` tracks how many consecutive heartbeat
+        # cycles have observed PTB's internal polling task as done/failed
+        # while ``updater.running`` is still True.  Two consecutive detections
+        # trigger a reconnect to break the zombie state.
+        _polling_task_done_count = 0
 
         while True:
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
                 if self.has_fatal_error:
                     return
+                updater = getattr(self._app, "updater", None) if self._app else None
                 bot = self._app.bot if self._app else None
                 if bot is None:
                     continue
@@ -1834,6 +1840,64 @@ class TelegramAdapter(BasePlatformAdapter):
                 # double), so there is nothing to probe — exit rather than spin.
                 if not callable(getattr(bot, "get_me", None)):
                     return
+
+                # ── PTB internal polling task health check ───────────────
+                # PTB's Updater can report `running=True` while its underlying
+                # polling task (``getUpdates`` consumer) has already completed
+                # with an error or been cancelled.  The ``error_callback``
+                # only fires on errors PTB's retry loop recognizes; internal
+                # task termination without an error (e.g. a cancelled task
+                # after bg-review side effects) leaves the gateway in a zombie
+                # state: process alive, updater.running True, but no updates
+                # are polled or processed (#55769).
+                #
+                # We probe the polling task directly.  PTB 20.x stores it as
+                # ``_Updater__polling_task`` (name-mangled) or ``_polling_task``
+                # depending on the version.  We check both spellings.
+                _ptb_polling_task = None
+                if updater is not None:
+                    for _attr in (
+                        "_Updater__polling_task",
+                        "_polling_task",
+                        "__polling_task",
+                    ):
+                        _task = getattr(updater, _attr, None)
+                        if _task is not None:
+                            _ptb_polling_task = _task
+                            break
+                if _ptb_polling_task is not None and _ptb_polling_task.done():
+                    _polling_task_done_count += 1
+                    logger.warning(
+                        "[%s] PTB internal polling task is done/failed "
+                        "(detected %d/2 consecutive heartbeat cycles) — "
+                        "updater.running=%s, task.exception=%s",
+                        self.name,
+                        _polling_task_done_count,
+                        getattr(updater, "running", "N/A"),
+                        _ptb_polling_task.exception() if _ptb_polling_task.done() else None,
+                    )
+                    if _polling_task_done_count >= 2:
+                        _polling_task_done_count = 0
+                        logger.error(
+                            "[%s] PTB polling task dead for 2+ heartbeat cycles; "
+                            "forcing polling reconnect",
+                            self.name,
+                        )
+                        if self._polling_error_task and not self._polling_error_task.done():
+                            self._polling_error_task.cancel()
+                        loop = asyncio.get_running_loop()
+                        self._polling_error_task = loop.create_task(
+                            self._handle_polling_network_error(
+                                RuntimeError(
+                                    "PTB internal polling task dead; task_status="
+                                    f"{_ptb_polling_task}"
+                                )
+                            )
+                        )
+                        continue
+                else:
+                    _polling_task_done_count = 0
+
                 await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
                 # get_me() succeeded — the general/send request path is healthy.
                 # That does NOT prove the getUpdates consumer is alive: PTB can

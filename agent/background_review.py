@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -707,6 +708,16 @@ def _run_review_in_thread(
             # conversation (the review fires every ~10 turns). Leave session
             # finalization to the real owner (CLI close / gateway reset / cron).
             review_agent._end_session_on_close = False
+            # IMPORTANT: Use a unique cleanup session ID so that close()'s
+            # cleanup operations (process_registry.kill_all, cleanup_vm,
+            # cleanup_browser) do NOT accidentally kill the parent's
+            # subprocesses, VMs, or browser sessions. The parent agent's
+            # session_id is shared for prompt-cache parity, but the bg-review
+            # fork must not clean up the parent's resources (#55769 / #47268).
+            # We store the parent's session_id for cache purposes and use a
+            # unique sub-ID for lifecycle cleanup.
+            review_agent._bg_review_cleanup_session_id = review_agent.session_id
+            review_agent.session_id = f"bg-review-{uuid.uuid4().hex[:12]}"
             # Never let the review fork compress. It shares the parent's
             # session_id, so if it won a compression race it would rotate the
             # parent into a NEW child that the gateway never adopts (the fork
