@@ -117,14 +117,6 @@
           "description": "auto-routes to cheapest coder meeting openrouter.min_coding_score"
         },
         {
-          "id": "openrouter/elephant-alpha",
-          "description": "free"
-        },
-        {
-          "id": "openrouter/owl-alpha",
-          "description": "free"
-        },
-        {
           "id": "poolside/laguna-m.1:free",
           "description": "free"
         },
