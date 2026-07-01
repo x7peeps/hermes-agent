@@ -61,7 +61,7 @@ class TestUpdateConfigForProviderClearsStaleCustomFields:
         returned = clear_model_endpoint_credentials(model_cfg)
 
         assert returned is model_cfg
-        assert "api_key" not in model_cfg
+        assert "api_key" in model_cfg and model_cfg["api_key"] == ""
         assert "api" not in model_cfg
         assert "api_mode" not in model_cfg
         assert model_cfg["provider"] == "openrouter"
@@ -78,8 +78,9 @@ class TestUpdateConfigForProviderClearsStaleCustomFields:
         model_cfg = _read_model_cfg()
         assert model_cfg.get("provider") == "openrouter"
         assert model_cfg.get("base_url") == "https://openrouter.ai/api/v1"
-        assert "api_key" not in model_cfg, (
-            "Stale custom api_key would leak into OpenRouter requests — must be cleared"
+        assert model_cfg.get("api_key") == "", (
+            "Stale custom api_key must be cleared to empty string — "
+            "it was previously written as '0' (YAML integer) via None serialisation (#56535)"
         )
         assert "api_mode" not in model_cfg, (
             "Stale api_mode=anthropic_messages from MiniMax would mis-route "
@@ -92,7 +93,7 @@ class TestUpdateConfigForProviderClearsStaleCustomFields:
         model_cfg = _read_model_cfg()
         assert model_cfg.get("provider") == "nous"
         assert "api_mode" not in model_cfg
-        assert "api_key" not in model_cfg
+        assert model_cfg.get("api_key") == ""
 
     def test_switching_clears_codex_responses_api_mode(self):
         """Also covers codex_responses, not just anthropic_messages."""

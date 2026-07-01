@@ -374,7 +374,7 @@ def test_model_flow_nous_does_not_restore_stale_custom_api_key(tmp_path, monkeyp
     assert model["provider"] == "nous"
     assert model["default"] == selected_model
     assert model["base_url"] == "https://inference-api.nousresearch.com/v1"
-    assert "api_key" not in model
+    assert model.get("api_key") == ""
     assert "api_mode" not in model
 
 
@@ -431,7 +431,7 @@ def test_model_flow_openrouter_clears_stale_custom_key(tmp_path, monkeypatch):
     assert model["provider"] == "openrouter"
     assert model["default"] == "anthropic/claude-sonnet-4.6"
     assert model["api_mode"] == "chat_completions"
-    assert "api_key" not in model
+    assert model.get("api_key") == ""
     assert "api" not in model
 
 
@@ -466,7 +466,7 @@ def test_model_flow_anthropic_clears_stale_custom_key_and_mode(tmp_path, monkeyp
     assert model["provider"] == "anthropic"
     assert model["default"] == "claude-sonnet-4-6"
     assert "base_url" not in model
-    assert "api_key" not in model
+    assert model.get("api_key") == ""
     assert "api" not in model
     assert "api_mode" not in model
 

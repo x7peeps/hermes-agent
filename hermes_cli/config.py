@@ -4360,11 +4360,18 @@ def clear_model_endpoint_credentials(
     credential pool. When switching away from a custom endpoint, leaving these
     fields behind keeps secrets in config.yaml and can contaminate later custom
     resolution paths.
+
+    Instead of popping ``api_key`` entirely, we set it to ``""`` so that
+    YAML serialisation produces ``api_key: ""`` (empty string) rather than
+    re-introducing the key with ``None``/``0`` via merge or normalisation
+    paths.  An empty string is safely falsy (``if not api_key:``) and, when
+    formatted as an auth header, produces an empty token — avoiding 401s
+    caused by ``"Bearer 0"`` (GitHub #56535).
     """
     if not isinstance(model_cfg, dict):
         return model_cfg
     if clear_api_key:
-        model_cfg.pop("api_key", None)
+        model_cfg["api_key"] = ""
         model_cfg.pop("api", None)
     if clear_api_mode:
         model_cfg.pop("api_mode", None)
