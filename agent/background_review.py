@@ -645,6 +645,14 @@ def _run_review_in_thread(
             # Match parent's toolset config so ``tools[]`` is byte-identical
             # in the request body — Anthropic's cache key includes it.
             # (The runtime whitelist below still restricts dispatch.)
+            # Pass the parent's session_id explicitly so init_agent()
+            # uses it directly instead of generating a TEMPORARY session_id
+            # that gets set globally via set_current_session_id() ->
+            # os.environ["HERMES_SESSION_ID"]. Without this, the background
+            # review pollutes the process-global HERMES_SESSION_ID env var
+            # with a value that differs from the parent's live session,
+            # which can confuse gateway session tracking and state
+            # management (#55925).
             review_agent = AIAgent(
                 model=_rt.get("model") or agent.model,
                 max_iterations=16,
@@ -655,6 +663,7 @@ def _run_review_in_thread(
                 base_url=_rt.get("base_url") or None,
                 api_key=_rt.get("api_key") or None,
                 credential_pool=getattr(agent, "_credential_pool", None),
+                session_id=agent.session_id,
                 parent_session_id=agent.session_id,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
@@ -706,6 +715,10 @@ def _run_review_in_thread(
                 # rebuild path, but these pins guarantee parity even
                 # if a future code path bypasses the cache.
                 review_agent.session_start = agent.session_start
+            # session_id was already passed to the constructor above, so this
+            # assignment is a safety net that should be a no-op in normal flow.
+            # It is kept as a defensive backstop in case a future code path
+            # between constructor and here resets session_id (#55925).
             review_agent.session_id = agent.session_id
             # The fork shares the parent's live session_id (pinned above for
             # prefix-cache parity). It is single-lifecycle and calls close()
