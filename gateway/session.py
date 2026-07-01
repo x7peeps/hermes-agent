@@ -1126,7 +1126,15 @@ class SessionStore:
         session_key: str,
         source: Optional[SessionSource],
     ) -> None:
-        """Persist the routing peer for an existing gateway session row."""
+        """Persist the routing peer for an existing gateway session row.
+
+        ``source`` is passed for backward compatibility but its ``platform``
+        value is intentionally NOT written to the DB — ``record_gateway_session_peer``
+        in ``hermes_state.py`` excludes ``source`` from the UPDATE to keep
+        the session's original creation provenance immutable (issues #56439,
+        #56456).  A ``/resume`` must not overwrite a TUI session's origin
+        to ``telegram``.
+        """
         if not self._db or not source:
             return
         recorder = getattr(self._db, "record_gateway_session_peer", None)

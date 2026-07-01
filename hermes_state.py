@@ -1641,26 +1641,34 @@ class SessionDB:
         self,
         session_id: str,
         *,
-        source: str,
+        source: Optional[str] = None,
         user_id: str = None,
         session_key: str = None,
         chat_id: str = None,
         chat_type: str = None,
         thread_id: str = None,
     ) -> None:
-        """Persist the gateway routing peer for an existing session row."""
+        """Persist the gateway routing peer for an existing session row.
+
+        ``source`` is intentionally excluded from the UPDATE below — it records
+        the original creation platform and must remain immutable once set.
+        ``switch_session()`` / ``/resume`` may change the routing key and peer
+        metadata, but the session's origin provenance never changes.  Including
+        ``source`` in the UPDATE would let a Telegram /resume overwrite a TUI
+        session's source to ``telegram``, causing context bleed and wrong
+        platform routing (issues #56439, #56456).
+        """
         if not session_id or not session_key:
             return
 
         def _do(conn):
             conn.execute(
                 """UPDATE sessions
-                   SET session_key = ?, source = ?, user_id = ?, chat_id = ?,
+                   SET session_key = ?, user_id = ?, chat_id = ?,
                        chat_type = ?, thread_id = ?
                    WHERE id = ?""",
                 (
                     session_key,
-                    source,
                     user_id,
                     chat_id,
                     chat_type,
@@ -1690,6 +1698,15 @@ class SessionDB:
         cleanup's ``agent_close`` bug are treated as recoverable; explicit
         conversation boundaries such as /new, /resume switches, and compression
         splits are not.
+
+        ``source`` is intentionally omitted from the primary WHERE clause:
+        ``session_key`` alone is already unique per session row (it encodes
+        platform + chat + user), so requiring ``source`` to match is
+        redundant.  It also breaks recovery after ``/resume`` switches a
+        session_key across platforms: the row's original ``source`` (e.g.
+        ``tui``) no longer matches the resuming platform (e.g. ``telegram``),
+        and without this fix the row would be invisible to the resuming
+        platform's recovery path (issues #56439, #56456).
         """
         if not session_key:
             return None
@@ -1698,7 +1715,6 @@ class SessionDB:
                 """
                 SELECT * FROM sessions
                 WHERE session_key = ?
-                  AND source = ?
                   AND (ended_at IS NULL OR end_reason = 'agent_close')
                   AND (COALESCE(message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1
@@ -1706,7 +1722,7 @@ class SessionDB:
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (session_key, source),
+                (session_key,),
             ).fetchone()
             if row is not None:
                 return dict(row)
