@@ -138,10 +138,13 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     scheduler provider here (no live adapters; delivery falls back to the
     per-platform send path).
 
-    Cross-process safe: the built-in provider's ``cron.scheduler.tick`` takes
-    the ``cron/.tick.lock`` file lock, so this never double-fires alongside a
-    real gateway on the same HERMES_HOME — whichever process grabs the lock
-    first wins the tick.
+    Cross-process safe on Unix: the built-in provider's ``cron.scheduler.tick``
+    takes the ``cron/.tick.lock`` file lock via ``fcntl.flock``, which
+    serialises correctly across processes.  On Windows, ``msvcrt`` byte-range
+    locks do NOT reliably serialise across ``pythonw.exe`` and ``python.exe``,
+    so the caller (``_lifespan``) must check ``is_gateway_running()`` and skip
+    the desktop ticker when a real gateway is already active — see the
+    ``HERMES_DESKTOP`` branch in ``_lifespan`` for that guard.
     """
     from cron.scheduler_provider import resolve_cron_scheduler
 
@@ -188,17 +191,44 @@ async def _lifespan(app: "FastAPI"):
     # Desktop-spawned backends (HERMES_DESKTOP=1) fire cron jobs themselves,
     # since the app has no gateway running the scheduler. Server `hermes
     # dashboard` is unaffected — it relies on its own gateway.
+    #
+    # Cross-process safety: when a real gateway (``hermes gateway run``) is
+    # already running for this profile, the desktop backend MUST NOT start a
+    # second cron ticker.  On Unix, ``fcntl.flock`` on ``cron/.tick.lock``
+    # serialises across processes correctly, but on Windows, ``msvcrt``
+    # byte-range locks do NOT reliably serialise across ``pythonw.exe``
+    # (gateway) and ``python.exe`` (desktop serve), so both tickers would
+    # execute the same due jobs and deliver duplicate messages.  Check the
+    # gateway PID file first, and only start a desktop ticker when no gateway
+    # is running.
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
     if os.getenv("HERMES_DESKTOP") == "1":
-        cron_stop = threading.Event()
-        cron_thread = threading.Thread(
-            target=_start_desktop_cron_ticker,
-            args=(cron_stop,),
-            daemon=True,
-            name="desktop-cron-ticker",
-        )
-        cron_thread.start()
+        # Check for an active gateway on the same HERMES_HOME before starting
+        # a desktop-side ticker.  Lazy-import to keep the module import chain
+        # shallow: gateway.status is heavy (imported only when HERMES_DESKTOP
+        # is active) and would otherwise be loaded on every `hermes dashboard`
+        # startup.
+        _gateway_running = False
+        try:
+            from gateway.status import is_gateway_running
+            _gateway_running = is_gateway_running()
+        except Exception:
+            _log.debug("Could not check gateway running status", exc_info=True)
+        if _gateway_running:
+            _log.info(
+                "Gateway already running for this profile — "
+                "desktop cron ticker skipped to avoid duplicate deliveries."
+            )
+        else:
+            cron_stop = threading.Event()
+            cron_thread = threading.Thread(
+                target=_start_desktop_cron_ticker,
+                args=(cron_stop,),
+                daemon=True,
+                name="desktop-cron-ticker",
+            )
+            cron_thread.start()
 
     try:
         yield
