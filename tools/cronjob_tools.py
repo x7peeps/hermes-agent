@@ -601,7 +601,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
+def _execute_job_now(job: Dict[str, Any], *, prompt: Optional[str] = None) -> Dict[str, Any]:
     """Execute a cron job immediately, outside the scheduler tick.
 
     Atomically claims the job first via ``claim_job_for_fire`` — the same
@@ -615,6 +615,10 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
     failure delivery, ``[SILENT]`` handling, and live-adapter delivery stay
     identical across paths and can't drift.
 
+    When *prompt* is supplied (triggered via ``cronjob(action='run', prompt=...)``),
+    it overrides the stored job prompt for this single run, so per-run context
+    reaches the spawned session. The stored prompt is NOT mutated.
+
     Returns {"claimed": bool, "success": bool, "error": str|None}.
     """
     job_id = job["id"]
@@ -626,9 +630,18 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
             return {"claimed": False, "success": False,
                     "error": "Job is already being fired by the scheduler; not run again."}
 
+        # Per-run prompt override: create a shallow copy so the stored job dict
+        # is never mutated.  _build_job_prompt reads ``job.get("prompt")``, so
+        # overriding it on the copy is sufficient — the entire prompt assembly
+        # chain (skills injection, script output, context_from) sees the
+        # per-run value instead of the stored one.
+        effective_job = job
+        if prompt is not None:
+            effective_job = {**job, "prompt": prompt}
+
         # run_one_job records last_run_at/last_status via mark_job_run (which
         # also clears the fire claim) and returns True iff it processed the job.
-        processed = run_one_job(job)
+        processed = run_one_job(effective_job)
         refreshed = get_job(job_id) or {}
         ok = refreshed.get("last_status") == "ok"
         return {
@@ -831,7 +844,11 @@ def cronjob(
             # no gateway/ticker is active (the #41037 case). The claim inside
             # _execute_job_now advances next_run_at and blocks a concurrent tick
             # from double-firing.
-            exec_result = _execute_job_now(job)
+            #
+            # Pass the per-run *prompt* (if supplied) so run-specific context
+            # reaches the spawned session, rather than silently discarding it
+            # and only executing the stored prompt (#57331).
+            exec_result = _execute_job_now(job, prompt=prompt)
             # Re-read so the response reflects the post-run last_run_at/last_status.
             result = _format_job(get_job(job_id) or {"id": job_id})
             result["executed"] = exec_result.get("claimed", False)
