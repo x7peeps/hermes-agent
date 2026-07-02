@@ -2588,15 +2588,54 @@ def _credential_fingerprint(provider: str) -> str:
     return hashlib.blake2b(blob, digest_size=8).hexdigest()
 
 
+def _prune_stale_cache_entries(cache: dict) -> dict:
+    """Remove cache entries for providers that no longer have valid credentials.
+
+    Checks each cached provider's credential fingerprint against the current
+    environment. Entries whose fingerprint has diverged (key removed/changed)
+    are removed so the model picker doesn't show stale models from old
+    providers alongside the user's actual configured ones.
+
+    Returns the pruned dict (may be mutated in-place but is a new object
+    when the caller wants to keep the original unchanged).
+    """
+    pruned = dict(cache)
+    for provider_key in list(pruned.keys()):
+        try:
+            current_fp = _credential_fingerprint(provider_key)
+            cached_fp = ""
+            entry = pruned.get(provider_key)
+            if isinstance(entry, dict):
+                cached_fp = str(entry.get("fp", ""))
+            if current_fp != cached_fp:
+                del pruned[provider_key]
+        except Exception:
+            # Best-effort: if fingerprinting fails for one provider, keep
+            # its entry rather than accidentally dropping valid data.
+            pass
+    return pruned
+
+
 def _load_provider_models_cache() -> dict:
-    """Return the full cache dict, or {} on any error."""
+    """Return the full cache dict, or {} on any error.
+
+    Auto-prunes stale entries (credentials changed/removed) on every load
+    so the cache never accumulates entries for providers the user no
+    longer uses.
+    """
     try:
         path = _provider_models_cache_path()
         if not path.exists():
             return {}
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        raw = data if isinstance(data, dict) else {}
+        pruned = _prune_stale_cache_entries(raw)
+        # Persist the pruned version so the stale entries don't re-appear
+        # on the next process start.
+        if len(pruned) < len(raw):
+            _save_provider_models_cache(pruned)
+        return pruned
     except Exception:
         return {}
 

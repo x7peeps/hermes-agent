@@ -1984,6 +1984,21 @@ def resolve_runtime_provider(
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
         creds = resolve_api_key_provider_credentials(provider)
+        api_key = str(creds.get("api_key", "")).strip()
+
+        # Warn when an explicitly configured provider has no API key set.
+        # This catches the "silent fallback" case where the user believes
+        # they are using provider X but all calls route through Y because
+        # X's credential env var was never set or was removed (#57065).
+        if not api_key and requested_provider != "auto":
+            logger.warning(
+                "Provider %r is explicitly configured but no API key was found "
+                "(checked env vars: %s). Requests may silently fall through "
+                "to a different provider. Set the required API key in "
+                "~/.hermes/.env or run `hermes model` to reconfigure.",
+                provider,
+                ", ".join(str(v) for v in (pconfig.api_key_env_vars or [])),
+            )
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — mirrors the Anthropic path above.  Without
         # this, users who set model.base_url to e.g. api.minimaxi.com/anthropic
@@ -2032,7 +2047,7 @@ def resolve_runtime_provider(
             "provider": provider,
             "api_mode": api_mode,
             "base_url": base_url,
-            "api_key": creds.get("api_key", ""),
+            "api_key": api_key,
             "source": creds.get("source", "env"),
             "requested_provider": requested_provider,
         }
