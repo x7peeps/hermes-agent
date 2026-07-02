@@ -243,6 +243,41 @@ def _extract_email_address(raw: str) -> str:
     return raw.strip().lower()
 
 
+# A relaxed but safe email pattern — matches the vast majority of real-world
+# email addresses without being as strict as RFC 5322 (which would reject
+# perfectly valid addresses like "user+tag@domain").  Used to extract a bare
+# email from a possibly-compound channel ID.
+_EMAIL_ADDR_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}"
+)
+
+
+def _extract_to_address(compound_id: str) -> str:
+    """Extract a bare SMTP To: address from a possibly-compound channel ID.
+
+    In the Hermes gateway a ``chat_id`` may carry extra routing metadata
+    beyond the bare email (e.g. ``email:user@example.com`` with a platform
+    prefix, or a suffix appended by session routing).  Sending the compound
+    string verbatim as ``msg['To']`` causes SMTP servers like Gmail to reject
+    it with ``555 5.5.2`` because the address is syntactically invalid.
+
+    This function searches the input for the first RFC-sane email-like
+    pattern and returns it.  When no match is found it falls back to the
+    stripped input and lets the SMTP layer raise its own error.
+    """
+    match = _EMAIL_ADDR_RE.search(compound_id)
+    if match:
+        return match.group(0).lower()
+    # Fallback: strip common platform-prefix delimiters
+    cleaned = compound_id.strip()
+    if ":" in cleaned and "@" not in cleaned:
+        _, _, maybe_addr = cleaned.rpartition(":")
+        sub_match = _EMAIL_ADDR_RE.search(maybe_addr)
+        if sub_match:
+            return sub_match.group(0).lower()
+    return cleaned
+
+
 def _domain_of(address: str) -> str:
     """Return the lowercased domain part of an email address, or ''."""
     _, _, domain = address.rpartition("@")
@@ -892,17 +927,18 @@ class EmailAdapter(BasePlatformAdapter):
 
     def _send_email(
         self,
-        to_addr: str,
+        to_addr_raw: str,
         body: str,
         reply_to_msg_id: Optional[str] = None,
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
+        to_addr = _extract_to_address(to_addr_raw)
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
         # Thread context for reply
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._thread_context.get(to_addr_raw, {})
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -1007,16 +1043,17 @@ class EmailAdapter(BasePlatformAdapter):
 
     def _send_email_with_attachments(
         self,
-        to_addr: str,
+        to_addr_raw: str,
         body: str,
         file_paths: List[str],
     ) -> str:
         """Send an email with multiple file attachments via SMTP."""
+        to_addr = _extract_to_address(to_addr_raw)
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._thread_context.get(to_addr_raw, {})
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -1086,17 +1123,18 @@ class EmailAdapter(BasePlatformAdapter):
 
     def _send_email_with_attachment(
         self,
-        to_addr: str,
+        to_addr_raw: str,
         body: str,
         file_path: str,
         file_name: Optional[str] = None,
     ) -> str:
         """Send an email with a file attachment via SMTP."""
+        to_addr = _extract_to_address(to_addr_raw)
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        ctx = self._thread_context.get(to_addr, {})
+        ctx = self._thread_context.get(to_addr_raw, {})
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -1188,9 +1226,10 @@ async def _standalone_send(
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
 
     try:
+        to_addr = _extract_to_address(chat_id)
         msg = MIMEText(message, "plain", "utf-8")
         msg["From"] = address
-        msg["To"] = chat_id
+        msg["To"] = to_addr
         msg["Subject"] = "Hermes Agent"
         msg["Date"] = formatdate(localtime=True)
 
@@ -1199,7 +1238,7 @@ async def _standalone_send(
         server.login(address, password)
         server.send_message(msg)
         server.quit()
-        return {"success": True, "platform": "email", "chat_id": chat_id}
+        return {"success": True, "platform": "email", "chat_id": to_addr}
     except Exception as e:
         try:
             from tools.send_message_tool import _error as _e
