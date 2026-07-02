@@ -185,7 +185,6 @@ class TestBuildCallKwargsMaxTokens:
             ("copilot", "gpt-5.4", "https://api.githubcopilot.com"),
             ("copilot", "gpt-5.5", "https://api.githubcopilot.com"),
             ("custom", "gpt-5", "https://api.openai.com/v1"),
-            ("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1"),
             ("nous", "hermes-4", "https://inference-api.nousresearch.com/v1"),
             ("custom", "qwen", "http://localhost:8080/v1"),
             ("zai", "glm-4v-flash", "https://open.bigmodel.cn/api/paas/v4"),
@@ -235,6 +234,34 @@ class TestBuildCallKwargsMaxTokens:
             base_url="https://integrate.api.nvidia.com/v1",
         )
         assert kwargs["max_tokens"] == 4096
+
+    def test_keeps_max_tokens_for_openrouter(self):
+        """OpenRouter preserves explicit max_tokens (#56901)."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        # Explicit provider "openrouter"
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="google/gemini-3-flash-preview",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=500,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert kwargs["max_tokens"] == 500
+
+    def test_keeps_max_tokens_for_openrouter_via_auto_base_url(self):
+        """Auto-detect that resolves to openrouter.ai keeps max_tokens (#56901)."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        # Provider "auto" with OpenRouter base_url simulates the auto-detect path
+        kwargs = _build_call_kwargs(
+            provider="auto",
+            model="google/gemini-3-flash-preview",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=500,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert kwargs["max_tokens"] == 500
 
 
 class TestNousTagsScoping:

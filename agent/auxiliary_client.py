@@ -5743,6 +5743,13 @@ def _build_call_kwargs(
         # 200 with an empty choices[] payload when max_tokens is omitted. The main
         # NVIDIA chat path already sends an output cap via the provider profile;
         # preserve it on the auxiliary path too.
+        #
+        # OpenRouter is a third exception: as an aggregator, it applies its own
+        # default max_tokens (65536) when the field is omitted — even on models
+        # that natively treat missing max_tokens as "unlimited." This inflated
+        # default can exceed the user's free-tier credit limit and produce a
+        # confusing HTTP 402 error (issue #56901). Preserve the caller's intent
+        # by forwarding the explicit max_tokens value.
         _effective_base = base_url or (
             _current_custom_base_url() if provider == "custom" else ""
         )
@@ -5751,9 +5758,14 @@ def _build_call_kwargs(
             _provider_norm in {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
             or base_url_host_matches(_effective_base, "integrate.api.nvidia.com")
         )
+        _is_openrouter = (
+            _provider_norm == "openrouter"
+            or base_url_host_matches(_effective_base, "openrouter.ai")
+        )
         if (
             _is_anthropic_compat_endpoint(provider, _effective_base)
             or _is_nvidia_nim
+            or _is_openrouter
         ):
             kwargs["max_tokens"] = max_tokens
 
