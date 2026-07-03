@@ -1979,18 +1979,25 @@ class MCPServerTask:
         here catches that in ≤ ``timeout`` seconds and raises
         :class:`NonMcpEndpointError` with an actionable message.
 
-        Detection is allow-list based: a 2xx response is rejected only when it
-        carries a definite content type that is NOT one an MCP endpoint uses
-        (``application/json`` / ``text/event-stream``). A missing or empty
-        content type, non-2xx status, or any network/transport error passes
-        through silently — the probe is strictly best-effort, and the real
-        handshake remains the source of truth for everything except the
-        unambiguous "this is a web page, not MCP" case.
+        Detection uses a two-phase strategy:
+
+        **Phase 1 — HEAD/GET probe (fast path).** A 2xx response with a known
+        MCP content type (``application/json`` / ``text/event-stream``) passes
+        immediately. A non-2xx status, missing content type, or network error
+        passes through silently — the real handshake remains the source of
+        truth.
+
+        **Phase 2 — POST ``initialize`` probe (fallback).** When phase 1
+        returns a 2xx response with a *non-MCP* content type (e.g. ``text/html``),
+        the server may only implement POST requests (as permitted by the MCP
+        specification).  In that case we send a minimal JSON-RPC ``initialize``
+        request.  If the server replies with a valid JSON-RPC response
+        (``application/json``) the endpoint is accepted; otherwise the
+        ``NonMcpEndpointError`` is raised.
 
         Runs on its own httpx client OUTSIDE the SDK's anyio task group, so the
         raised error propagates as itself rather than being wrapped in an
-        ``ExceptionGroup`` (which is what defeats hooks installed inside the
-        SDK transport).
+        ``ExceptionGroup``.
         """
         try:
             import httpx as _httpx
@@ -2008,8 +2015,9 @@ class MCPServerTask:
         probe_headers = dict(headers) if headers else {}
         try:
             async with _httpx.AsyncClient(**client_kwargs) as client:
-                # HEAD is cheapest; fall back to GET if the server doesn't
-                # implement it (405 Method Not Allowed / 501 Not Implemented).
+                # Phase 1 — HEAD is cheapest; fall back to GET if the server
+                # doesn't implement it (405 Method Not Allowed / 501 Not
+                # Implemented).
                 resp = await client.head(url, headers=probe_headers)
                 if resp.status_code in (405, 501):
                     resp = await client.get(url, headers=probe_headers)
@@ -2027,14 +2035,64 @@ class MCPServerTask:
         if ct_base in self._MCP_CONTENT_TYPES:
             return  # Looks like a real MCP endpoint.
 
-        raise NonMcpEndpointError(
-            f"MCP server '{self.name}' at {url} returned Content-Type "
-            f"'{ct_base}', not an MCP response (expected one of: "
-            f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
-            "points at a web page rather than an MCP endpoint — check it "
-            "resolves to a Streamable HTTP / SSE endpoint "
-            "(e.g. https://host/mcp, not https://host/)."
+        # ── Phase 2 — POST initialize probe ──────────────────────────────
+        # The HEAD/GET returned a 2xx with a non-MCP content type.  Some MCP
+        # servers only implement POST (the spec does not require GET/HEAD),
+        # so try a minimal JSON-RPC ``initialize`` before giving up.
+        _initialize_body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "hermes-agent", "version": "probe"},
+            },
+        }).encode()
+        _post_headers = dict(probe_headers)
+        _post_headers.setdefault("content-type", "application/json")
+        _post_headers.setdefault(
+            "mcp-protocol-version", LATEST_PROTOCOL_VERSION
         )
+        try:
+            async with _httpx.AsyncClient(**client_kwargs) as client:
+                post_resp = await client.post(
+                    url, headers=_post_headers, content=_initialize_body
+                )
+        except _httpx.HTTPError:
+            # POST probe failed — surface the original error so the user
+            # still gets an actionable message pointing at the URL.
+            raise NonMcpEndpointError(
+                f"MCP server '{self.name}' at {url} returned Content-Type "
+                f"'{ct_base}' on HEAD/GET and the POST initialize probe also "
+                f"failed (network error). The URL most likely points at a web "
+                f"page rather than an MCP endpoint — check it resolves to a "
+                f"Streamable HTTP / SSE endpoint "
+                f"(e.g. https://host/mcp, not https://host/)."
+            )
+
+        if 200 <= post_resp.status_code < 300:
+            post_ct = (
+                post_resp.headers.get("content-type", "").split(";")[0]
+                .strip().lower()
+            )
+            if post_ct in self._MCP_CONTENT_TYPES:
+                return  # POST initialize succeeded — valid MCP endpoint.
+            # POST returned HTML too — definitive: not MCP.
+            raise NonMcpEndpointError(
+                f"MCP server '{self.name}' at {url} returned Content-Type "
+                f"'{ct_base}' on HEAD/GET and '{post_ct}' on POST. Neither "
+                f"looks like an MCP response (expected one of: "
+                f"{', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
+                f"points at a web page rather than an MCP endpoint — check it "
+                f"resolves to a Streamable HTTP / SSE endpoint "
+                f"(e.g. https://host/mcp, not https://host/)."
+            )
+
+        # Non-2xx POST response — the server is reachable but rejecting the
+        # preflight payload (e.g. auth challenge). Let the real SDK handshake
+        # handle it.
+        return
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""

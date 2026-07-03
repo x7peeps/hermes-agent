@@ -56,12 +56,18 @@ def _serve(handler_cls):
 
 def _handler(status: int = 200,
              content_type: "str | None" = "text/html; charset=utf-8",
-             body: bytes = b"<html>x</html>", head_status=None, record=None):
+             body: bytes = b"<html>x</html>", head_status=None, record=None,
+             post_status=None, post_content_type=None, post_body=None):
     """Build a BaseHTTPRequestHandler that replies with the given shape.
 
     ``head_status`` lets HEAD return a different status than GET (to exercise
     the HEAD->GET fallback). ``record`` is an optional list that captures the
     HTTP methods the server actually saw.
+
+    ``post_status`` / ``post_content_type`` / ``post_body`` let POST return
+    a different shape than GET (used to test the Phase 2 POST initialize
+    probe).  When omitted, POST falls through to BaseHTTPRequestHandler's
+    default 501 "Unsupported method" response.
     """
 
     class _H(http.server.BaseHTTPRequestHandler):
@@ -85,6 +91,14 @@ def _handler(status: int = 200,
                 record.append("GET")
             self._write(status, content_type, body)
 
+        def do_POST(self):
+            if record is not None:
+                record.append("POST")
+            sc = post_status if post_status is not None else status
+            ct = post_content_type if post_content_type is not None else content_type
+            pl = post_body if post_body is not None else body
+            self._write(sc, ct, pl)
+
         def log_message(self, format, *args):  # noqa: A002
             pass
 
@@ -104,7 +118,8 @@ def _handler(status: int = 200,
 ])
 def test_non_mcp_content_type_raises(content_type):
     task = _make_task("bad_srv")
-    with _serve(_handler(status=200, content_type=content_type)) as base:
+    with _serve(_handler(status=200, content_type=content_type,
+                         post_content_type=content_type)) as base:
         with pytest.raises(NonMcpEndpointError) as exc_info:
             asyncio.run(task._preflight_content_type(f"{base}/", timeout=5.0))
     msg = str(exc_info.value)
@@ -195,10 +210,11 @@ def test_head_405_falls_back_to_get_and_rejects_html():
     with _serve(_handler(
         status=200, content_type="text/html",
         head_status=405, record=record,
+        post_content_type="text/html",
     )) as base:
         with pytest.raises(NonMcpEndpointError):
             asyncio.run(task._preflight_content_type(f"{base}/", timeout=5.0))
-    assert record == ["HEAD", "GET"]
+    assert record == ["HEAD", "GET", "POST"]
 
 
 def test_head_501_falls_back_to_get_and_passes_json():
@@ -213,8 +229,80 @@ def test_head_501_falls_back_to_get_and_passes_json():
 
 
 # ---------------------------------------------------------------------------
-# ssl_verify / client_cert forwarding to the probe client
+# POST initialize probe fallback
 # ---------------------------------------------------------------------------
+
+def test_get_html_post_json_passes():
+    """POST-only MCP server: returns text/html on GET but application/json
+    on POST initialize — must pass through (Stirling-PDF scenario)."""
+    task = _make_task("post_only_srv")
+    record: list[str] = []
+    with _serve(_handler(
+        status=200, content_type="text/html",
+        record=record,
+        post_status=200, post_content_type="application/json",
+        post_body=b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}',
+    )) as base:
+        # Must not raise.
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    assert record == ["HEAD", "POST"]  # HEAD falls through, then POST
+
+
+def test_get_html_404_post_json_passes():
+    """Server returns 404 on HEAD and GET but valid JSON on POST — Phase 1
+    exits at the non-2xx check (does not judge content type), so POST
+    initialize is never reached."""
+    task = _make_task("needs_post")
+    record: list[str] = []
+    with _serve(_handler(
+        status=404, content_type="text/html",
+        record=record,
+        post_status=200, post_content_type="application/json",
+        post_body=b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26"}}',
+    )) as base:
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    # All returns are 404 — Phase 1 exits before Phase 2
+    assert record == ["HEAD"]
+
+
+def test_get_json_post_html_also_passes():
+    """If GET already returns application/json, POST probe is not reached."""
+    task = _make_task("early_pass")
+    record: list[str] = []
+    with _serve(_handler(
+        status=200, content_type="application/json", body=b"{}",
+        record=record,
+        post_content_type="text/html",
+    )) as base:
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    assert record == ["HEAD"]  # Only HEAD needed
+
+
+def test_get_json_head_405_post_html_also_passes():
+    """HEAD fails with 405, GET returns application/json — passes before POST."""
+    task = _make_task("head_405_get_json")
+    record: list[str] = []
+    with _serve(_handler(
+        status=200, content_type="application/json", body=b"{}",
+        head_status=405, record=record,
+        post_content_type="text/html",
+    )) as base:
+        asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    assert record == ["HEAD", "GET"]
+
+
+def test_post_html_after_get_html_raises():
+    """Both GET and POST return text/html — definitive non-MCP endpoint."""
+    task = _make_task("html_all_around")
+    with _serve(_handler(
+        status=200, content_type="text/html",
+        post_content_type="text/html",
+    )) as base:
+        with pytest.raises(NonMcpEndpointError) as exc_info:
+            asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
+    msg = str(exc_info.value)
+    assert "html_all_around" in msg
+    assert "POST" in msg  # Error message mentions both GET and POST result
 
 # ---------------------------------------------------------------------------
 # OAuth server: why the run() guard is needed
@@ -238,7 +326,8 @@ def test_oauth_server_html_response_raises_without_skip():
     """
     task = _make_task("hospitable")
     # HEAD returns 200 text/html — what Hospitable sends without a token.
-    with _serve(_handler(status=200, content_type="text/html; charset=UTF-8")) as base:
+    with _serve(_handler(status=200, content_type="text/html; charset=UTF-8",
+                         post_content_type="text/html; charset=UTF-8")) as base:
         with pytest.raises(NonMcpEndpointError) as exc_info:
             asyncio.run(task._preflight_content_type(f"{base}/mcp", timeout=5.0))
     assert "hospitable" in str(exc_info.value)
