@@ -595,8 +595,18 @@ async def _run_with_concurrency(
     concurrency = max(concurrency, 1)
     sem = asyncio.Semaphore(concurrency)
 
-    async def _wrap(thunk: Callable[[], Awaitable[None]]) -> None:
-        async with sem:
-            await thunk()
+    async def _wrap(thunk: Callable[[], Awaitable[None]]) -> BaseException | None:
+        try:
+            async with sem:
+                await thunk()
+        except Exception as exc:
+            return exc
+        return None
 
-    await asyncio.gather(*(_wrap(t) for t in tasks))
+    results = await asyncio.gather(
+        *(_wrap(t) for t in tasks),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            raise result
