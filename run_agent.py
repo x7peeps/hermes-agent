@@ -4040,6 +4040,16 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
+        # Per-request clients MUST NOT share the primary client's
+        # http_client (httpx connection pool).  When they do, two
+        # concurrent requests can race for pool connections, producing
+        # interleaved or truncated bytes on the wire.  LiteLLM (and
+        # other proxies parsing raw HTTP) then sees a "partial request"
+        # with a malformed Authorization header and fails with
+        # "Ensure Key has `Bearer ` prefix" — between the header
+        # being interleaved with bytes from the sibling request.
+        # Issue #57863.
+        request_kwargs.pop("http_client", None)
         # Per-request OpenAI-wire clients (used by both the non-streaming
         # chat-completions path and the streaming chat-completions path
         # in `_interruptible_api_call`) should not run the SDK's built-in
