@@ -1836,7 +1836,7 @@ def _cwd_for_session_key(session_key: str) -> str:
 
 def _set_session_context(session_key: str, cwd: str | None = None) -> list:
     try:
-        from gateway.session_context import set_session_vars
+        from gateway.session_context import set_current_session_id, set_session_vars
 
         # Ephemeral task IDs (background, preview) aren't in `_sessions`, so the
         # reverse-map returns "" and would clear the cwd override. Callers that
@@ -1849,6 +1849,15 @@ def _set_session_context(session_key: str, cwd: str | None = None) -> list:
                 if sess.get("session_key") == session_key:
                     source = _session_source(sess)
                     break
+        # set_session_vars sets the ContextVar (thread-safe), but the TUI
+        # gateway runs multiple sessions concurrently in one process.  Other
+        # threads may call set_current_session_id() (e.g. during agent init
+        # or compression rotation), which overwrites the process-global
+        # os.environ["HERMES_SESSION_ID"].  Synchronize it here so any code
+        # that reads os.environ directly (kanban tools, ACP adapter, etc.)
+        # sees the correct session id for the current turn instead of a
+        # stale value from a concurrent session's thread.
+        set_current_session_id(session_key)
         return set_session_vars(session_key=session_key, source=source, cwd=resolved)
     except Exception:
         return []
