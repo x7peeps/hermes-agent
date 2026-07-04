@@ -124,6 +124,7 @@ _RATE_LIMIT_PATTERNS = [
     "rate_limit",
     "too many requests",
     "throttled",
+    "throttling",          # Alibaba/DashScope "Throttling.AllocationQuota"
     "requests per minute",
     "tokens per minute",
     "requests per day",
@@ -1199,7 +1200,7 @@ def _classify_by_error_code(
     """Classify by structured error codes from the response body."""
     code_lower = error_code.lower()
 
-    if code_lower in {"resource_exhausted", "throttled", "rate_limit_exceeded"}:
+    if code_lower in {"resource_exhausted", "throttled", "throttling", "rate_limit_exceeded", "throttling.allocationquota"}:
         return result_fn(
             FailoverReason.rate_limit,
             retryable=True,

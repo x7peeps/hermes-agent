@@ -2134,6 +2134,52 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # Usage comes in the final chunk with empty choices
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage_obj = chunk.usage
+
+                # ── SSE error frame detection ────────────────────────────────
+                # Some OpenAI-compatible streaming providers (Alibaba Cloud
+                # Model Studio / Bailian DashScope, OpenRouter, and others)
+                # return a successful outer HTTP 200 but encode the actual
+                # provider error inside the SSE stream body as:
+                #
+                #   event:error
+                #   data: {"code":"Throttling.AllocationQuota","message":"..."}
+                #
+                # The OpenAI SDK's Stream class (v2.24.0) doesn't raise an
+                # APIError for this shape because the data dict lacks an
+                # ``"error"`` key at the top level (the SDK only checks
+                # ``data.get("error")``).  Instead it constructs a
+                # ``ChatCompletionChunk`` with no ``choices`` via pydantic
+                # ``construct()``, storing the provider error fields in
+                # ``__pydantic_extra__``.  Without this guard the error frame
+                # is silently ``continue``d past and the provider error never
+                # reaches the retry / backoff / failover machinery.
+                #
+                # Check for the telltale error payload fields that providers
+                # embed in the extra-data space of a malformed chunk.
+                from run_agent import _StreamErrorEvent as _SSEStreamErrorEvent
+
+                _sse_code = getattr(chunk, "code", None)
+                _sse_msg = getattr(chunk, "message", None)
+                if _sse_code is not None or _sse_msg is not None:
+                    _sse_err_text = str(_sse_msg or _sse_code or "Provider stream error").strip()
+                    _sse_err_code = str(_sse_code).strip() if _sse_code is not None else None
+                    # Extract a numeric HTTP status from the error code when
+                    # present (e.g. HTTP_STATUS/429 may survive in certain
+                    # relaxed SSE implementations, or the code itself embeds
+                    # status info like ``code="Throttling"`` which the error
+                    # classifier maps to rate_limit via the ``throttl`` pattern).
+                    _sse_status: int | None = None
+                    if _sse_err_code:
+                        import re as _re
+                        _status_match = _re.search(r"(?:^|[^\d])(4\d{2}|5\d{2})(?:[^\d]|$)", _sse_err_code)
+                        if _status_match:
+                            _sse_status = int(_status_match.group(1))
+                    raise _SSEStreamErrorEvent(
+                        _sse_err_text,
+                        code=_sse_err_code,
+                        status_code=_sse_status,
+                    )
+
                 continue
 
             delta = chunk.choices[0].delta
