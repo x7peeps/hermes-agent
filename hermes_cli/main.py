@@ -8308,11 +8308,14 @@ def _log_only_write(text: str) -> None:
         pass
 
 
-def _run_logged_subprocess(cmd, *, cwd=None, env=None):
+def _run_logged_subprocess(cmd, *, cwd=None, env=None, timeout=900):
     """Run ``cmd`` capturing combined output into update.log (not the terminal).
 
     Returns the ``CompletedProcess`` (with ``stdout`` populated) so the caller
     can decide whether to surface the captured output on failure.
+
+    ``timeout`` (seconds, default 900) prevents a hung build from blocking the
+    entire ``hermes update`` process indefinitely.
     """
     result = subprocess.run(
         cmd,
@@ -8324,6 +8327,7 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=timeout,
     )
     _log_only_write(result.stdout or "")
     return result
