@@ -2351,7 +2351,7 @@ class MatrixAdapter(BasePlatformAdapter):
         if inspect.isawaitable(tasks):
             tasks = await tasks
         if tasks:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _is_self_sender(self, sender: str) -> bool:
         """Return True if the sender refers to the bot's own account.
