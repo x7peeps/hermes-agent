@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8645
 DEFAULT_WEBHOOK_PATH = "/bluebubbles-webhook"
+DEFAULT_MAX_BODY_BYTES = 1_048_576  # 1 MB default webhook body limit
 MAX_TEXT_LENGTH = 4000
 
 # BlueBubbles/iMessage does not expose a stable bot mention identity like
@@ -137,6 +138,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not str(self.webhook_path).startswith("/"):
             self.webhook_path = f"/{self.webhook_path}"
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
+        self._max_body_bytes = max(
+            1, int(extra.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
+        )
         _require_mention = extra.get("require_mention")
         if _require_mention is None:
             _require_mention = os.getenv("BLUEBUBBLES_REQUIRE_MENTION")
@@ -264,7 +268,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 self.client = None
             return False
 
-        app = web.Application()
+        # Inbound webhook server.
+        # client_max_size backstops the bounded reader in _handle_webhook —
+        # aiohttp enforces the cap on request.read()/post() paths too
+        # (#58536/#58902/#59180 pattern).
+        app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
         # The webhook auth value is carried in the query string because the
@@ -874,6 +882,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         if token != self.password:
             return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            content_length = request.content_length
+        except Exception:
+            content_length = None
+        if content_length is not None and content_length > self._max_body_bytes:
+            return web.Response(status=413)
         try:
             raw = await request.read()
             body = raw.decode("utf-8", errors="replace")
