@@ -399,6 +399,7 @@ def _do_git_install(entry: CatalogEntry) -> Path:
     if not is_sha_ref:
         proc = subprocess.run(
             [git, "clone", "--depth", "1", "--branch", install.ref, install.url, str(dest)],
+            timeout=300,
         )
         if proc.returncode == 0:
             pass
@@ -410,10 +411,10 @@ def _do_git_install(entry: CatalogEntry) -> Path:
             is_sha_ref = True  # treat the same as a SHA ref from here
 
     if is_sha_ref:
-        proc = subprocess.run([git, "clone", install.url, str(dest)])
+        proc = subprocess.run([git, "clone", install.url, str(dest)], timeout=300)
         if proc.returncode != 0:
             raise CatalogError(f"git clone failed for {install.url}")
-        proc = subprocess.run([git, "-C", str(dest), "checkout", install.ref])
+        proc = subprocess.run([git, "-C", str(dest), "checkout", install.ref], timeout=60)
         if proc.returncode != 0:
             raise CatalogError(f"git checkout {install.ref} failed")
 
