@@ -680,6 +680,7 @@ class LSPClient:
         if not isinstance(diagnostics, list):
             diagnostics = []
         version = params.get("version")
+        loop_time = asyncio.get_running_loop().time()
 
         doc = self._docs.setdefault(path, _DocState(version=-1))
         if self._seed_first_push and not doc.seed_seen:
@@ -869,15 +870,12 @@ class LSPClient:
         Best-effort — never throws if the server doesn't support pull
         diagnostics; we still get the push side.
         """
-        if timeout is not None and timeout > 0:
-            budget = timeout
-        else:
-            budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
-        deadline = asyncio.get_event_loop().time() + budget
+        budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
+        deadline = asyncio.get_running_loop().time() + budget
         abs_path = os.path.abspath(path)
 
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return False
 
@@ -910,8 +908,8 @@ class LSPClient:
             # Loop until budget runs out.
 
     async def _wait_for_fresh_push(self, path: str, version: int, timeout: float) -> None:
-        """Wait until a fresh publishDiagnostics arrives for ``path`` at ``version``+."""
-        deadline = asyncio.get_event_loop().time() + timeout
+        """Wait until a publishDiagnostics arrives for ``path`` at ``version``+."""
+        deadline = asyncio.get_running_loop().time() + timeout
         baseline = self._push_counter
         while True:
             doc = self._docs.get(path)
@@ -921,9 +919,9 @@ class LSPClient:
                 # snapshot the counter so we wake on a *new* push, not
                 # on the one that satisfied us a moment ago.
                 debounce_baseline = self._push_counter
-                debounce_deadline = asyncio.get_event_loop().time() + PUSH_DEBOUNCE
+                debounce_deadline = asyncio.get_running_loop().time() + PUSH_DEBOUNCE
                 while self._push_counter == debounce_baseline:
-                    remaining = debounce_deadline - asyncio.get_event_loop().time()
+                    remaining = debounce_deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         break
                     self._push_event.clear()
@@ -932,7 +930,7 @@ class LSPClient:
                     except asyncio.TimeoutError:
                         break
                 return
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 return
             if self._push_counter > baseline:
