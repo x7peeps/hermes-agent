@@ -169,10 +169,12 @@ def _ensure_qrcode_installed() -> bool:
         [sys.executable, "-m", "pip", "install", "-q", "qrcode"],
     ):
         try:
-            subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120
+            )
             import qrcode  # noqa: F401,F811
             return True
-        except (subprocess.CalledProcessError, ImportError, FileNotFoundError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ImportError, FileNotFoundError):
             continue
     return False
 
