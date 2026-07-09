@@ -1232,6 +1232,10 @@ def try_shrink_image_parts_in_messages(
                 )
             finally:
                 try:
+                    tmp.close()
+                except Exception:
+                    pass
+                try:
                     Path(tmp.name).unlink(missing_ok=True)
                 except Exception:
                     pass
