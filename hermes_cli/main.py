@@ -4500,6 +4500,7 @@ def _capture_head_sha(git_cmd, cwd) -> str | None:
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=5,
             check=True,
         )
         return result.stdout.strip() or None
