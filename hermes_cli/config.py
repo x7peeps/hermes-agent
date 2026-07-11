@@ -6430,6 +6430,21 @@ def _explicit_config_paths(config: Dict[str, Any]) -> Set[Tuple[str, ...]]:
     Used by ``save_config`` to build the *preserve* set passed to
     ``_strip_default_values`` so only user-authored keys survive the
     defaults-strip pass.
+
+    Also returns all ancestor paths of each leaf so that intermediate
+    dict nodes (e.g. ``platforms``, ``platforms.feishu``) are never
+    stripped away by ``_strip_default_values`` even when every child
+    under them matches the schema default.  This prevents the silent
+    data-loss bug where a minimal config like::
+
+        platforms:
+          feishu:
+            enabled: true
+
+    loses the entire ``platforms`` section on save because only the leaf
+    ``("platforms","feishu","enabled")`` was in the preserve set while
+    the parent dicts were not — and ``_strip_default_values`` drops any
+    dict whose children are all stripped.
     """
     paths: Set[Tuple[str, ...]] = set()
 
@@ -6439,7 +6454,10 @@ def _explicit_config_paths(config: Dict[str, Any]) -> Set[Tuple[str, ...]]:
                 _walk(child, path + (key,))
             return
         if path:
-            paths.add(path)
+            # Record every ancestor path so intermediate dicts are never
+            # stripped away even when all their leaves match defaults.
+            for i in range(1, len(path) + 1):
+                paths.add(path[:i])
 
     _walk(config, ())
     return paths
