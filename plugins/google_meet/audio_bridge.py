@@ -84,6 +84,7 @@ class AudioBridge:
                 try:
                     subprocess.run(
                         ["pactl", "unload-module", str(mod_id)],
+                        timeout=5,
                         check=False,
                         capture_output=True,
                         stdin=subprocess.DEVNULL,
@@ -109,6 +110,7 @@ class AudioBridge:
                     f"sink_name={sink_name}",
                     "sink_properties=device.description=HermesMeetSink",
                 ],
+                timeout=15,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -134,6 +136,7 @@ class AudioBridge:
                     f"source_name={src_name}",
                     f"master={sink_name}.monitor",
                 ],
+                timeout=15,
                 check=True,
                 capture_output=True,
                 text=True,
@@ -143,6 +146,7 @@ class AudioBridge:
             # Roll back the null-sink we just created so we don't leak it.
             subprocess.run(
                 ["pactl", "unload-module", str(sink_mod_id)],
+                timeout=5,
                 check=False,
                 capture_output=True,
                 stdin=subprocess.DEVNULL,
