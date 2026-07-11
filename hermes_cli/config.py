@@ -8086,7 +8086,12 @@ def edit_config():
         return
     
     print(f"Opening {config_path} in {editor}...")
-    subprocess.run([editor, str(config_path)])
+    try:
+        subprocess.run([editor, str(config_path)], timeout=3600)
+    except subprocess.TimeoutExpired:
+        print(f"Editor timed out after 1 hour.")
+    except KeyboardInterrupt:
+        print("\nEditor interrupted.")
 
 
 def set_config_value(key: str, value: str):
