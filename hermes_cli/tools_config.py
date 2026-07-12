@@ -1159,7 +1159,8 @@ def _run_post_setup(post_setup_key: str):
                 # only, avoiding the apps/* glob which would pull in
                 # apps/desktop (Electron + node-pty) unnecessarily. See #38772.
                 [npm_bin, "install", "--silent", "--workspaces=false"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT)
+                capture_output=True, text=True, timeout=120,
+                cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
             )
             if result.returncode == 0:
                 _print_success("    Node.js dependencies installed")
@@ -1265,7 +1266,8 @@ def _run_post_setup(post_setup_key: str):
             result = subprocess.run(
                 # --workspaces=false avoids resolving apps/desktop. See #38772.
                 [_npm_bin, "install", "--silent", "--workspaces=false"],
-                capture_output=True, text=True, cwd=str(PROJECT_ROOT)
+                capture_output=True, text=True, timeout=120,
+                cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL,
             )
             if result.returncode == 0:
                 _print_success("    Camofox installed")
