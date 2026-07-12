@@ -127,11 +127,27 @@ async def _shutdown_abandoned_app(app) -> None:
     ``client.is_closed``, so closing the request transports directly releases
     the pool regardless of PTB init state.  We try the clean path first, then
     fall back to the transports.  All best-effort and swallowed.
+
+    CRITICAL FIX (#63309): ``app.shutdown()`` can also hang inside a
+    cancellation-shielded anyio scope (the same class of bug that made
+    ``initialize()`` block).  If ``on_abandon`` itself blocks, the entire
+    retry ladder deadlocks — the timer fires, ``task.cancel()`` returns, but
+    we never raise ``TimeoutError`` because we are still awaiting the cleanup.
+    Guard every ``await`` with a short wall-clock deadline so the abandon
+    path can never re-block the retry loop.
     """
     if app is None:
         return
+    # Guard app.shutdown() with a short timeout so a hung shutdown() cannot
+    # re-block the abandon path and deadlock the retry ladder (#63309).
     try:
-        await app.shutdown()
+        await _await_with_thread_deadline(
+            app.shutdown(),
+            timeout=5.0,
+            on_abandon=None,
+        )
+    except asyncio.TimeoutError:
+        logger.debug("Abandoned Telegram app.shutdown() timed out", exc_info=True)
     except Exception:
         logger.debug("Abandoned Telegram app.shutdown() failed", exc_info=True)
     # Directly close the underlying request transports (bypasses PTB's
@@ -148,7 +164,15 @@ async def _shutdown_abandoned_app(app) -> None:
         try:
             result = shutdown()
             if asyncio.iscoroutine(result) or asyncio.isfuture(result):
-                await result
+                # Same guard: a hung request.shutdown() would also deadlock
+                # the abandon path.  Use a short timeout to break out.
+                await _await_with_thread_deadline(
+                    result,
+                    timeout=3.0,
+                    on_abandon=None,
+                )
+        except asyncio.TimeoutError:
+            logger.debug("Abandoned Telegram request.shutdown() timed out", exc_info=True)
         except Exception:
             logger.debug("Abandoned Telegram request shutdown failed", exc_info=True)
 
