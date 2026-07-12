@@ -3562,7 +3562,10 @@ def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
         return False, f"Refusing to uninstall '{skill_name}': {exc}"
 
     if install_path.exists():
-        shutil.rmtree(install_path)
+        try:
+            shutil.rmtree(install_path, ignore_errors=True)
+        except OSError:
+            pass
 
     lock.record_uninstall(skill_name)
     append_audit_log("UNINSTALL", skill_name, entry["source"], entry["trust_level"], "n/a", "user_request")
