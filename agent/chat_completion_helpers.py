@@ -2404,6 +2404,26 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         _last_id_at_idx[raw_idx] = delta_id
                     idx = _active_slot_by_idx[raw_idx]
 
+                    # Gemini (OpenAI-compat) fix: parallel tool calls arrive
+                    # with the *same* index and the *same* delta id, but
+                    # different function names.  Without this guard the
+                    # arguments from every parallel call are concatenated into
+                    # a single slot, producing invalid JSON like
+                    # '{"a":1}{"b":2}' which _repair_tool_call_arguments
+                    # cannot split and falls back to "{}" — silently dropping
+                    # the intended actions.  Detect a name change on an
+                    # already-populated slot and redirect to a fresh slot.
+                    if (
+                        tc_delta.function
+                        and tc_delta.function.name
+                        and idx in tool_calls_acc
+                        and tool_calls_acc[idx]["function"]["name"]
+                        and tool_calls_acc[idx]["function"]["name"] != tc_delta.function.name
+                    ):
+                        new_slot = max(tool_calls_acc, default=-1) + 1
+                        _active_slot_by_idx[raw_idx] = new_slot
+                        idx = new_slot
+
                     if idx not in tool_calls_acc:
                         # Poolside may send integer id instead of string
                         _tc_id = tc_delta.id
