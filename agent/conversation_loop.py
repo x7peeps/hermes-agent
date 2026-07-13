@@ -4631,6 +4631,21 @@ def run_conversation(
 
                 assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
                 
+                # ── Classify this turn's tools BEFORE processing content ─────
+                # Determine whether EVERY tool call in this turn is post-response
+                # housekeeping (memory, todo, skill_manage, session_search).  This
+                # classification is needed regardless of whether the turn also
+                # carries visible content — a substantive tool-only turn must
+                # invalidate any stale housekeeping fallback from an older turn.
+                # See issue #63860 for the regression scenario.
+                _HOUSEKEEPING_TOOLS = frozenset({
+                    "memory", "todo", "skill_manage", "session_search",
+                })
+                _all_housekeeping = all(
+                    tc.function.name in _HOUSEKEEPING_TOOLS
+                    for tc in assistant_message.tool_calls
+                )
+
                 # If this turn has both content AND tool_calls, capture the content
                 # as a fallback final response. Common pattern: model delivers its
                 # answer and calls memory/skill tools as a side-effect in the same
@@ -4638,18 +4653,6 @@ def run_conversation(
                 turn_content = assistant_message.content or ""
                 if turn_content and agent._has_content_after_think_block(turn_content):
                     agent._last_content_with_tools = turn_content
-                    # Only mute subsequent output when EVERY tool call in
-                    # this turn is post-response housekeeping (memory, todo,
-                    # skill_manage, etc.).  If any substantive tool is present
-                    # (search_files, read_file, write_file, terminal, ...),
-                    # keep output visible so the user sees progress.
-                    _HOUSEKEEPING_TOOLS = frozenset({
-                        "memory", "todo", "skill_manage", "session_search",
-                    })
-                    _all_housekeeping = all(
-                        tc.function.name in _HOUSEKEEPING_TOOLS
-                        for tc in assistant_message.tool_calls
-                    )
                     agent._last_content_tools_all_housekeeping = _all_housekeeping
                     if _all_housekeeping and agent._has_stream_consumers():
                         agent._mute_post_response = True
@@ -4657,6 +4660,14 @@ def run_conversation(
                         clean = agent._strip_think_blocks(turn_content).strip()
                         if clean:
                             agent._vprint(f"  ┊ 💬 {clean}")
+                else:
+                    # Turn has substantive tool calls but no (or non-visible)
+                    # content.  Clear any stale housekeeping fallback from an
+                    # earlier turn so the empty-follow-up shortcut at line 4865
+                    # does not misclassify it.
+                    if not _all_housekeeping:
+                        agent._last_content_with_tools = None
+                        agent._last_content_tools_all_housekeeping = False
                 
                 # Pop thinking-only prefill message(s) before appending
                 # (tool-call path — same rationale as the final-response path).
