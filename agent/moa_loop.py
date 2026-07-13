@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any
 
 from agent.auxiliary_client import call_llm
@@ -380,7 +380,20 @@ def _run_references_parallel(
         # Collect every reference before returning — the aggregator needs the
         # complete set, so there is no early-exit / first-completed path here.
         for future, idx in futures.items():
-            results[idx] = future.result()
+            try:
+                results[idx] = future.result(timeout=300)
+            except FutureTimeoutError:
+                slot = reference_models[idx]
+                label = _slot_label(slot)
+                logger.warning(
+                    "MoA reference '%s' timed out after 300s", label,
+                )
+                from agent.usage_pricing import CanonicalUsage
+                results[idx] = (
+                    label,
+                    "[skipped: reference model timed out after 300s]",
+                    _RefAccounting(CanonicalUsage()),
+                )
 
     return [r for r in results if r is not None]
 
