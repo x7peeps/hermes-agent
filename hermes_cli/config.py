@@ -1845,13 +1845,13 @@ DEFAULT_CONFIG = {
         # spinner), or ascii.  Live-swappable via `/indicator <style>`.
         "tui_status_indicator": "kaomoji",
         # Seconds between prompt_toolkit redraws in the classic CLI when idle.
-        # Default 1.0 keeps the wall-clock status-bar read-outs (idle-since-
-        # last-turn) ticking and keeps the bottom chrome alive during idle —
-        # without it prompt_toolkit stops repainting the status bar after a
-        # turn and it can go stale/disappear (#45592).
-        # Set 0 to disable the background refresh if it fights terminal
-        # auto-scroll in non-fullscreen mode on some emulators (#48309).
-        "cli_refresh_interval": 1.0,
+        # Default 0 disables background refresh to avoid fighting terminal
+        # auto-scroll in non-fullscreen mode (Xshell, iTerm2, Windows Terminal,
+        # tmux, Ghostty, cmux) — periodic redraws cause the viewport to jump
+        # back to bottom even when no new output arrives (#48309, #63895).
+        # Users who need the wall-clock status-bar read-out to tick can set
+        # this to 1.0; on emulators where it causes scroll-jumping, keep 0.
+        "cli_refresh_interval": 0,
         "user_message_preview": {  # CLI: how many submitted user-message lines to echo back in scrollback
             "first_lines": 2,
             "last_lines": 2,

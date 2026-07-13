@@ -1318,14 +1318,14 @@ class TestInterimAssistantMessageConfig:
 
 
 class TestCliRefreshIntervalConfig:
-    """Test the CLI refresh_interval config default (#45592 / #48309)."""
+    """Test the CLI refresh_interval config default (#45592 / #48309 / #63895)."""
 
-    def test_default_config_enables_cli_refresh_interval(self):
-        """cli_refresh_interval defaults to 1.0 so the idle status-bar
-        clock keeps ticking and the bottom chrome stays alive during
-        idle (#45592). Users on emulators where the periodic redraw
-        fights auto-scroll can set it to 0 (#48309)."""
-        assert DEFAULT_CONFIG["display"]["cli_refresh_interval"] == 1.0
+    def test_default_config_disables_cli_refresh_interval(self):
+        """cli_refresh_interval defaults to 0 to prevent periodic redraws
+        from fighting terminal auto-scroll in non-fullscreen mode (#48309,
+        #63895). Users who need the wall-clock status-bar clock to tick can
+        set it to 1.0 on emulators that handle it correctly."""
+        assert DEFAULT_CONFIG["display"]["cli_refresh_interval"] == 0
 
 
 class TestDiscordChannelPromptsConfig:
