@@ -387,6 +387,16 @@ def apply_wal_with_fallback(
         current_mode = conn.execute("PRAGMA journal_mode").fetchone()
         if current_mode and current_mode[0] == "wal":
             _apply_macos_checkpoint_barrier(conn)
+            # Ensure durability on Darwin: synchronous=FULL + fullfsync=ON
+            # even when WAL was already set by a previous connection.
+            # Without this, synchronous may remain at NORMAL (1) and
+            # fsync() on macOS does not guarantee data-on-platter.
+            if sys.platform == "darwin":
+                try:
+                    conn.execute("PRAGMA synchronous=FULL")
+                    conn.execute("PRAGMA fullfsync=ON")
+                except sqlite3.OperationalError:
+                    pass
             return "wal"
     except sqlite3.OperationalError:
         pass
@@ -394,6 +404,13 @@ def apply_wal_with_fallback(
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         _apply_macos_checkpoint_barrier(conn)
+        # Ensure durability on Darwin: synchronous=FULL + fullfsync=ON.
+        if sys.platform == "darwin":
+            try:
+                conn.execute("PRAGMA synchronous=FULL")
+                conn.execute("PRAGMA fullfsync=ON")
+            except sqlite3.OperationalError:
+                pass
         return "wal"
     except sqlite3.OperationalError as exc:
         msg = str(exc).lower()
