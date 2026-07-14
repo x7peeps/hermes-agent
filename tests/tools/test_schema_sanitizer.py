@@ -759,3 +759,51 @@ def test_strip_slash_enum_ignores_non_string_enum_values():
     props = tools[0]["function"]["parameters"]["properties"]
     assert props["level"]["enum"] == [1, 2, 3]
     assert props["flag"]["enum"] == [True, False]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# dependentRequired — JSON Schema draft 2019-09+ keyword (GH #64587)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+
+def test_dependent_required_preserved():
+    """dependentRequired dict must survive sanitization unchanged.
+
+    Regression test for GH #64587: _sanitize_node was recursing into
+    dependentRequired values (lists of property-name strings), treating each
+    string as a bare-string schema and replacing it with {"type": "object",
+    "properties": {}}, which broke MCP tool schemas and caused HTTP 400 errors.
+    """
+    tools = [_tool("mcp__github__search_issues", {
+        "type": "object",
+        "properties": {
+            "owner": {"type": "string"},
+            "repo": {"type": "string"},
+        },
+        "required": ["owner", "repo"],
+        "dependentRequired": {
+            "owner": ["repo"],
+            "repo": ["owner"],
+        },
+    })]
+    out = sanitize_tool_schemas(tools)
+    params = out[0]["function"]["parameters"]
+    assert params["dependentRequired"] == {
+        "owner": ["repo"],
+        "repo": ["owner"],
+    }
+    assert params["required"] == ["owner", "repo"]
+
+
+def test_dependent_required_deepcopy_isolation():
+    """Modifying output must not mutate the original input."""
+    import copy
+    original = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "dependentRequired": {"a": ["b"]},
+    }
+    tools = [_tool("t", copy.deepcopy(original))]
+    _ = sanitize_tool_schemas(tools)
+    assert tools[0]["function"]["parameters"]["dependentRequired"] == {"a": ["b"]}
