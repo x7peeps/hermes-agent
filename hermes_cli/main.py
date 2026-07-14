@@ -7807,48 +7807,47 @@ def _update_node_dependencies() -> None:
     # With a single workspace lockfile the root install would cover ALL
     # workspaces — but apps/desktop pulls in Electron as a devDependency,
     # and its postinstall downloads a ~200MB binary.  Most users don't
-    # need desktop during `hermes update`, so we install root-only first
-    # then add just the workspaces the CLI/TUI/web build actually requires.
-    # Desktop deps are installed on demand by the desktop launcher
-    # (see _desktop_build_needed).
+    # need desktop during `hermes update`, so we skip it.
+    #
+    # Fix for #64354: Do a SINGLE ``npm ci --ignore-scripts`` that installs
+    # every workspace (root deps + ui-tui + web + desktop) while skipping
+    # all postinstall scripts.  This avoids the two-step ``npm ci`` pattern
+    # where the second call wiped root-only deps (agent-browser, @streamdown)
+    # because ``npm ci`` always performs a full clean of node_modules.
+    # Desktop's postinstall (electron binary download) is safely skipped;
+    # desktop deps are still present in node_modules but unused — they are
+    # installed on demand by the desktop launcher (see _desktop_build_needed).
     print("→ Updating Node.js dependencies...")
     extra_args = ["--no-fund", "--no-audit", "--progress=false"]
 
     nixos_env = with_hermes_node_path(_nixos_build_env())
 
-    # Step 1: root install (no workspace recursion).
-    root_args = [*extra_args, "--workspaces=false"]
-    root_result = _run_npm_install_deterministic(
+    # Single deterministic install: root + all workspaces, no postinstalls.
+    install_args = [*extra_args, "--ignore-scripts"]
+    install_result = _run_npm_install_deterministic(
         npm,
         PROJECT_ROOT,
-        extra_args=tuple(root_args),
+        extra_args=tuple(install_args),
         capture_output=False,
         env=nixos_env,
     )
-    if root_result.returncode != 0:
-        print("  ⚠ npm install failed in repo root")
-        stderr = (root_result.stderr or "").strip() if root_result.stderr else ""
+    if install_result.returncode != 0:
+        print("  ⚠ npm install failed")
+        stderr = (install_result.stderr or "").strip() if install_result.stderr else ""
         if stderr:
             print(f"    {stderr.splitlines()[-1]}")
         return
 
-    # Step 2: install only the workspaces update needs (ui-tui, web).
-    # --workspace selects specific workspaces; the rest (desktop) are skipped.
-    ws_args = [*extra_args, "--workspace", "ui-tui", "--workspace", "web"]
-    ws_result = _run_npm_install_deterministic(
-        npm,
-        PROJECT_ROOT,
-        extra_args=tuple(ws_args),
+    # Run the root postinstall (just a friendly echo); skip workspace
+    # postinstalls since desktop is excluded from the update path.
+    postinstall_env = {**os.environ, **(nixos_env or {}), "CI": "1"}
+    subprocess.run(
+        [npm, "run", "postinstall"],
+        cwd=PROJECT_ROOT,
+        env=postinstall_env,
         capture_output=False,
-        env=nixos_env,
     )
-    if ws_result.returncode == 0:
-        print("  ✓ repo root + ui-tui, web workspaces (desktop skipped)")
-    else:
-        print("  ⚠ npm workspace install failed")
-        stderr = (ws_result.stderr or "").strip() if ws_result.stderr else ""
-        if stderr:
-            print(f"    {stderr.splitlines()[-1]}")
+    print("  ✓ root + all workspaces (desktop postinstall skipped)")
 
 
 class _UpdateOutputStream:
