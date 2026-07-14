@@ -3862,7 +3862,10 @@ def tick(
                 msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
             except (OSError, IOError):
                 pass
-        lock_fd.close()
+        try:
+            lock_fd.close()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
