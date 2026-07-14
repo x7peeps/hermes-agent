@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from agent.auxiliary_client import call_llm
@@ -380,8 +380,17 @@ def _run_references_parallel(
             ] = idx
         # Collect every reference before returning — the aggregator needs the
         # complete set, so there is no early-exit / first-completed path here.
+        _REF_TIMEOUT = 120  # seconds — matches typical LLM API patience
         for future, idx in futures.items():
-            results[idx] = future.result()
+            try:
+                results[idx] = future.result(timeout=_REF_TIMEOUT)
+            except FuturesTimeoutError:
+                logger.warning(
+                    "[moa] reference model call timed out after %ds (idx=%s) — "
+                    "marking as failed so the aggregator can proceed",
+                    _REF_TIMEOUT, idx,
+                )
+                results[idx] = None
 
     return [r for r in results if r is not None]
 
