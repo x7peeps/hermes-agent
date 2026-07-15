@@ -380,7 +380,10 @@ def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     """
     for cmd in commands:
         print(color(f"  $ {cmd}", Colors.DIM))
-        proc = subprocess.run(cmd, cwd=str(cwd), shell=True)
+        proc = subprocess.run(
+            cmd, cwd=str(cwd), shell=True, timeout=600,
+            stdin=subprocess.DEVNULL,
+        )
         if proc.returncode != 0:
             raise CatalogError(
                 f"bootstrap step failed (exit {proc.returncode}): {cmd}"
