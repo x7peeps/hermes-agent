@@ -719,8 +719,24 @@ def launch_detached_profile_gateway_restart(profile: str, old_pid: int) -> bool:
 
 
 def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
-    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits."""
+    """Spawn the detached watcher that respawns ``run_argv`` once ``old_pid`` exits.
+
+    On macOS (launchd) we **never** spawn a detached watchdog.  ``start_new_session=True``
+    calls ``os.setsid()`` which creates a new session and reparents the child to PID 1,
+    completely escaping launchd's process tracking.  The result is either an orphaned
+    gateway (serving while launchd reports ``state = not running``) or restart churn
+    (KeepAlive spawns a competitor).  Since launchd already provides crash-restart via
+    ``KeepAlive = true``, the internal watchdog is unnecessary on macOS and actively
+    harmful — it breaks the very service lifecycle it was meant to supplement.
+
+    See issue #64778 for the full reproduction and impact analysis.
+    """
     if old_pid <= 0 or not run_argv:
+        return False
+
+    # macOS / launchd: skip detached watchdog — setsid escapes launchd tracking
+    # and creates orphaned gateways + KeepAlive churn (#64778).
+    if is_macos():
         return False
 
     # The watcher is a tiny Python subprocess that polls the old PID and
