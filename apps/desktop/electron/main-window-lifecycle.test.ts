@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-
 import { test } from 'vitest'
 
 import { ensureMainWindow } from './main-window-lifecycle'
@@ -8,7 +7,6 @@ test('recreates a destroyed primary window without focusing it', () => {
   const destroyedWindow = {
     isDestroyed: () => true
   }
-
   let createCalls = 0
   let focusCalls = 0
 
@@ -44,7 +42,6 @@ test('focuses a live primary window for a normal second launch', () => {
   const liveWindow = {
     isDestroyed: () => false
   }
-
   let focusedWindow = null
 
   ensureMainWindow(liveWindow, {
