@@ -392,6 +392,15 @@ def _compute_tool_definitions(
         for ts_name in get_all_toolsets():
             tools_to_include.update(resolve_toolset(ts_name))
 
+    # Auto-include MCP toolsets so all platforms (CLI, gateway, etc.)
+    # can use configured MCP servers. MCP toolsets are dynamically
+    # registered at runtime (not in toolsets.py), so they'd otherwise
+    # be invisible to platforms with a hardcoded toolset list.
+    mcp_ts_names = [ts for ts in registry.get_registered_toolset_names()
+                    if ts.startswith("mcp-")]
+    for ts_name in mcp_ts_names:
+        tools_to_include.update(resolve_toolset(ts_name))
+
     # Always apply disabled toolsets as a subtraction step at the end.
     # This ensures that even if a composite toolset (like hermes-cli)
     # is enabled, any tools belonging to a disabled toolset are strictly
