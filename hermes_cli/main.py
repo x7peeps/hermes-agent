@@ -4836,7 +4836,13 @@ def _run_npm_install_deterministic(
     # unicode-animations' postinstall animates to /dev/tty (bypasses
     # --silent/capture_output). It no-ops when CI is set — same as the TUI
     # install path and nix/lib.nix npm ci hooks.
-    run_env = {**os.environ, **(env or {}), "CI": "1"}
+    run_env = {**os.environ, **(env or {})}
+    # Strip NODE_ENV so npm never omits devDependencies during install/build.
+    # TUI/dashboard may inject NODE_ENV=production for React runtime, but
+    # npm ci/install must always see devDeps (typescript, vite, etc.).
+    # See #65562.
+    run_env.pop("NODE_ENV", None)
+    run_env["CI"] = "1"
 
     lockfile = cwd / "package-lock.json"
     if lockfile.exists():
