@@ -7459,7 +7459,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Process in batches of 100 with event-loop yield points to avoid
             # O(n^2) event-loop blocking when recovering thousands of watchers.
             for i, watcher in enumerate(watchers):
-                asyncio.create_task(self._run_process_watcher(watcher))
+                task = asyncio.create_task(self._run_process_watcher(watcher))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
                 logger.info("Resumed watcher for recovered process %s", watcher.get("session_id"))
                 if i % 100 == 99:
                     await asyncio.sleep(0)
@@ -7467,18 +7469,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.error("Recovered watcher setup error: %s", e)
 
         # Start background session expiry watcher to finalize expired sessions
-        asyncio.create_task(self._session_expiry_watcher())
+        task = asyncio.create_task(self._session_expiry_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start background kanban notifier — delivers `completed`, `blocked`,
         # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
         # so human-in-the-loop workflows hear back without polling.
-        asyncio.create_task(self._kanban_notifier_watcher())
+        task = asyncio.create_task(self._kanban_notifier_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start background kanban dispatcher — spawns workers for ready
         # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
         # When false, users run `hermes kanban daemon` externally or
         # simply don't use kanban; this loop becomes a no-op.
-        asyncio.create_task(self._kanban_dispatcher_watcher())
+        task = asyncio.create_task(self._kanban_dispatcher_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -7487,19 +7495,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 len(self._failed_platforms),
                 ", ".join(p.value for p in self._failed_platforms),
             )
-        asyncio.create_task(self._platform_reconnect_watcher())
+        task = asyncio.create_task(self._platform_reconnect_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start background handoff watcher — picks up CLI sessions marked
         # handoff_state='pending' in state.db and re-binds them to the
         # destination platform's home channel, then forges a synthetic user
         # turn so the agent kicks off the new chat.
-        asyncio.create_task(self._handoff_watcher())
+        task = asyncio.create_task(self._handoff_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start background async-delegation watcher — drains completion events
         # from delegate_task(background=true) subagents and injects each
         # result back into its originating session as a new turn, covering the
         # idle case where the subagent finishes with no agent turn running.
-        asyncio.create_task(self._async_delegation_watcher())
+        task = asyncio.create_task(self._async_delegation_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Start the scale-to-zero idle watcher ONLY when this instance is opted
         # in (the NAS "Labs" HERMES_SCALE_TO_ZERO stamp), messaging is
@@ -7513,7 +7527,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "scale-to-zero: armed (idle timeout %.0fs) — watching for idle",
                     self._scale_to_zero_idle_timeout_seconds(),
                 )
-                asyncio.create_task(self._scale_to_zero_watcher())
+                task = asyncio.create_task(self._scale_to_zero_watcher())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
             else:
                 # Surface WHY an OPTED-IN instance didn't arm (a non-opted instance
                 # not arming is normal — stay silent there). Without this, a failed
@@ -7528,7 +7544,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # left behind by a prior instantiation (durable-volume restart, NS-570)
         # is ignored via its instantiation epoch; only a current-epoch marker
         # engages drain on the first tick.
-        asyncio.create_task(self._drain_control_watcher())
+        task = asyncio.create_task(self._drain_control_watcher())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         logger.info("Press Ctrl+C to stop")
         
@@ -12056,7 +12074,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 watchers = process_registry.pending_watchers
                 process_registry.pending_watchers = []
                 for i, watcher in enumerate(watchers):
-                    asyncio.create_task(self._run_process_watcher(watcher))
+                    task = asyncio.create_task(self._run_process_watcher(watcher))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
                     if i % 100 == 99:
                         await asyncio.sleep(0)
             except Exception as e:
@@ -21205,7 +21225,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 )
             except Exception as _e:
                 logger.debug("spawn_async_diagnostic failed: %s", _e)
-        asyncio.create_task(runner.stop())
+        task = asyncio.create_task(runner.stop())
+        runner._background_tasks.add(task)
+        task.add_done_callback(runner._background_tasks.discard)
 
     def restart_signal_handler():
         runner.request_restart(detached=False, via_service=True)
