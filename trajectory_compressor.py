@@ -1206,7 +1206,10 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
             ]
             
             # Run all tasks concurrently (semaphore limits actual concurrency)
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, BaseException):
+                    self.logger.error("Trajectory processing task failed: %s", r)
             
             # Remove status task
             progress.remove_task(status_task)
