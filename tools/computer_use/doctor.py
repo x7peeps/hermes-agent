@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence
@@ -239,8 +240,9 @@ def run_doctor(
 ) -> int:
     """Resolve the cua-driver binary, call `health_report`, render the result.
 
-    Honors `HERMES_CUA_DRIVER_CMD` via the shared runtime resolver, so the
-    doctor diagnoses what your `computer_use` toolset will actually invoke.
+    Honors `HERMES_CUA_DRIVER_CMD` via the same `_cua_driver_cmd()` resolver
+    that `install_cua_driver` + the runtime backend use, so the doctor
+    diagnoses what your `computer_use` toolset will actually invoke.
     """
     # Windows ships stdout/stderr wrapped with the system ANSI codec
     # (`cp1252` on a US locale, `cp936` on zh-CN, etc.). The check-matrix
@@ -253,12 +255,16 @@ def run_doctor(
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, OSError):
             pass
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
+    if driver_cmd is None:
+        try:
+            from hermes_cli.tools_config import _cua_driver_cmd
+            driver_cmd = _cua_driver_cmd()
+        except Exception:
+            driver_cmd = os.environ.get("HERMES_CUA_DRIVER_CMD") or "cua-driver"
 
-    binary = resolve_cua_driver_cmd(driver_cmd)
+    binary = shutil.which(driver_cmd)
     if not binary:
-        looked_for = driver_cmd or "cua-driver (PATH and canonical install paths)"
-        print(f"cua-driver: not installed (looked for {looked_for!r}).")
+        print(f"cua-driver: not installed (looked for {driver_cmd!r}).")
         print("  Run: hermes computer-use install")
         return 2
 

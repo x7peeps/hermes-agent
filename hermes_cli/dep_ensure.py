@@ -151,18 +151,10 @@ def ensure_dependency(
 
     run_env = hermes_subprocess_env(inherit_credentials=False)
     run_env["IS_INTERACTIVE"] = "false"
-    try:
-        result = subprocess.run(
-            cmd,
-            env=run_env,
-            timeout=300,
-            stdin=subprocess.DEVNULL,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        if interactive:
-            print(f"  {_DEP_DESCRIPTIONS.get(dep, dep)} install timed out.")
-        return False
+    result = subprocess.run(
+        cmd,
+        env=run_env,
+    )
     if result.returncode != 0:
         return False
 

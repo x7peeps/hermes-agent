@@ -334,9 +334,6 @@ def _jobs_lock():
                 # in-process-only protection (still held via _jobs_file_lock).
                 logger.warning("jobs.json cross-process lock unavailable (%s); "
                                "proceeding with in-process lock only", e)
-                if lock_fd is not None:
-                    lock_fd.close()
-                    lock_fd = None
             try:
                 yield
             finally:
@@ -868,16 +865,13 @@ def load_jobs() -> List[Dict[str, Any]]:
     _strict_retry = False  # track whether we used the strict=False fallback
 
     try:
-        # utf-8-sig: Windows Notepad / PowerShell 5.1 Set-Content -Encoding UTF8
-        # write a leading BOM; json.load under plain utf-8 raises
-        # JSONDecodeError("Unexpected UTF-8 BOM") and takes down cron.
-        with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+        with open(jobs_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
         try:
-            with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+            with open(jobs_file, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)

@@ -158,19 +158,10 @@ export function useComposerDraft({
       return undefined
     }
 
-    const offFocus = onComposerFocusRequest(({ target: requested, typeChar }) => {
-      if (requested !== target) {
-        return
+    const offFocus = onComposerFocusRequest(requested => {
+      if (requested === target) {
+        setFocusRequestId(id => id + 1)
       }
-
-      // Type-to-focus appends at end; bare Enter just focuses.
-      if (typeChar) {
-        paintDraft(`${draftRef.current}${typeChar}`, true)
-
-        return
-      }
-
-      setFocusRequestId(id => id + 1)
     })
 
     const offInsert = onComposerInsertRequest(({ mode, target: requested, text }) => {
@@ -183,7 +174,7 @@ export function useComposerDraft({
       offFocus()
       offInsert()
     }
-  }, [appendExternalText, inputDisabled, paintDraft, target])
+  }, [appendExternalText, inputDisabled, target])
 
   const stashAt = (scope: string | null, text = draftRef.current, attachments = attachmentScope.$attachments.get()) =>
     stashSessionDraft(scope, text, attachments)

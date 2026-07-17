@@ -2378,7 +2378,6 @@ def set_runtime_main(
     provider: str,
     model: str,
     *,
-    requested_provider: str = "",
     base_url: str = "",
     api_key: Any = "",
     api_mode: str = "",
@@ -2394,7 +2393,6 @@ def set_runtime_main(
     global _RUNTIME_MAIN_AUTH_MODE, _RUNTIME_MAIN_COMPAT_SNAPSHOT
     runtime = {
         "provider": (provider or "").strip().lower(),
-        "requested_provider": (requested_provider or "").strip().lower(),
         "model": (model or "").strip(),
         "base_url": (base_url or "").strip(),
         "api_key": (
@@ -2867,7 +2865,6 @@ _AUTO_PROVIDER_LABELS = {
 }
 
 _MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "auth_mode")
-_MAIN_RUNTIME_CONTEXT_FIELDS = _MAIN_RUNTIME_FIELDS + ("requested_provider",)
 
 
 def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2890,7 +2887,7 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     if not isinstance(main_runtime, dict):
         return {}
     normalized: Dict[str, Any] = {}
-    for field in _MAIN_RUNTIME_CONTEXT_FIELDS:
+    for field in _MAIN_RUNTIME_FIELDS:
         value = main_runtime.get(field)
         # Preserve a callable api_key (Entra ID bearer provider) unchanged.
         if field == "api_key" and callable(value) and not isinstance(value, str):
@@ -2898,10 +2895,9 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
             continue
         if isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
-    for identity_field in ("provider", "requested_provider"):
-        identity = normalized.get(identity_field)
-        if isinstance(identity, str):
-            normalized[identity_field] = identity.lower()
+    provider = normalized.get("provider")
+    if isinstance(provider, str):
+        normalized["provider"] = provider.lower()
     return normalized
 
 
@@ -6257,13 +6253,6 @@ def _resolve_task_provider_model(
         cfg_model = str(task_config.get("model", "")).strip() or None
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
-        # Resolve key_env → env var when api_key is not set directly
-        if not cfg_api_key:
-            cfg_key_env = str(
-                task_config.get("key_env") or task_config.get("api_key_env") or ""
-            ).strip()
-            if cfg_key_env:
-                cfg_api_key = os.getenv(cfg_key_env, "").strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
     # 'auto' is a sentinel meaning "inherit from main runtime / auto-detect", not

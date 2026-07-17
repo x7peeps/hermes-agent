@@ -16,7 +16,7 @@ import { getUiState, patchUiState } from './uiStore.js'
 
 const DOUBLE_ENTER_MS = 450
 
-export const expandSnips = (snips: PasteSnippet[]) => {
+const expandSnips = (snips: PasteSnippet[]) => {
   const byLabel = new Map<string, string[]>()
 
   for (const { label, text } of snips) {
@@ -158,9 +158,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
   //   - 'steer'     : inject into the current turn via session.steer; falls
   //                   back to queue when steer is rejected (no agent / no
   //                   tool window).
-  //   - 'interrupt' (default): submit immediately; the backend redirects the
-  //                   active model request (or safely steers after a tool),
-  //                   with legacy interrupt + queue as its compatibility path.
+  //   - 'interrupt' (default): queue the text + interrupt with `keepBusy`; the
+  //                   busy→false settle edge drains it once (desktop parity).
+  //                   No optimistic send → no duplicate bubble / race note.
   //
   // `opts.fallbackToFront` re-inserts at the queue head (queue-edit picks keep
   // their position); the mainline submit path appends.
@@ -201,13 +201,14 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return
       }
 
-      // The gateway owns the atomic redirect decision because it knows whether
-      // the agent is in model generation, tool execution, or an older runtime.
-      // Reuse the normal submit pipeline so the correction gets its user bubble
-      // and file-drop interpolation exactly once.
-      send(full)
+      // 'interrupt': queue + interrupt(keepBusy); the settle edge drains it once.
+      enqueueText()
+
+      if (live.sid) {
+        turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys }, { keepBusy: true })
+      }
     },
-    [composerActions, composerRefs, gw, send, sys]
+    [appendMessage, composerActions, composerRefs, gw, sys]
   )
 
   const dispatchSubmission = useCallback(
@@ -216,14 +217,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return
       }
 
-      // History stores expanded paste content, not the `[[…]]` label: snips
-      // are cleared on submit, so recall must be self-contained. Idempotent on
-      // label-free text, so re-submitting a recalled entry stays stable.
-      const toHistory = expandSnips(composerState.pasteSnips)(full)
-
       if (looksLikeSlashCommand(full)) {
         appendMessage({ kind: 'slash', role: 'system', text: full })
-        composerActions.pushHistory(toHistory)
+        composerActions.pushHistory(full)
         slashRef.current(full)
         composerActions.clearIn()
 
@@ -239,7 +235,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const live = getUiState()
 
       if (!live.sid) {
-        composerActions.pushHistory(toHistory)
+        composerActions.pushHistory(full)
         composerActions.enqueue(full)
         composerActions.clearIn()
 
@@ -275,7 +271,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sendQueued(picked)
       }
 
-      composerActions.pushHistory(toHistory)
+      composerActions.pushHistory(full)
 
       if (getUiState().busy) {
         return handleBusyInput(full)
@@ -289,18 +285,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
       send(full)
     },
-    [
-      appendMessage,
-      composerActions,
-      composerRefs,
-      composerState.pasteSnips,
-      handleBusyInput,
-      interpolate,
-      send,
-      sendQueued,
-      shellExec,
-      slashRef
-    ]
+    [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
   )
 
   const submit = useCallback(

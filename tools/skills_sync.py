@@ -54,7 +54,8 @@ def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
     Checks HERMES_BUNDLED_SKILLS env var first (set by Nix wrapper),
-    then falls back to the relative path from this source file.
+    then a wheel-installed data dir, then falls back to the relative
+    path from this source file.
     """
     return get_bundled_skills_dir(Path(__file__).parent.parent / "skills")
 

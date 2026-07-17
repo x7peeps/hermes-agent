@@ -374,23 +374,6 @@ def _background_review_write_guard(
                     f"skill '{name}'."
                 ),
             }
-        # Manually authored skills (created_by != "agent") are off-limits
-        # to autonomous curation. This prevents the LLM consolidation pass
-        # from archiving skills the user placed manually (e.g. via URL
-        # install or direct SKILL.md authoring), which lack the
-        # `created_by: "agent"` marker.
-        usage_data = skill_usage.load_usage()
-        usage_rec = usage_data.get(name)
-        if isinstance(usage_rec, dict) and not skill_usage._is_curator_managed_record(usage_rec):
-            return {
-                "success": False,
-                "error": (
-                    f"Refusing background curator {action} for skill "
-                    f"'{name}': the skill records show it is not agent-created "
-                    f"(created_by={usage_rec.get('created_by')!r}). Manually authored "
-                    f"skills are off-limits to autonomous curation."
-                ),
-            }
     except Exception:
         logger.debug("owned skill guard lookup failed for %s", name, exc_info=True)
     return None
@@ -1132,18 +1115,12 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
             message += f" Content absorbed into '{absorbed_target}'."
         return {"success": True, "message": message, "_archived": True}
 
-    try:
-        shutil.rmtree(skill_dir)
-    except OSError as e:
-        return {"success": False, "error": f"failed to delete skill '{name}': {e}"}
+    shutil.rmtree(skill_dir)
 
     # Clean up empty category directories (don't remove the skills root itself)
     parent = skill_dir.parent
     if parent != skills_root and parent.exists() and not any(parent.iterdir()):
-        try:
-            parent.rmdir()
-        except OSError:
-            pass  # best-effort; the skill itself is already deleted
+        parent.rmdir()
 
     message = f"Skill '{name}' deleted."
     if is_consolidation:

@@ -1099,7 +1099,6 @@ class TeamsAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         allow_permanent: bool = True,
-        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """Send an Adaptive Card approval prompt with Allow/Deny buttons."""
@@ -1118,7 +1117,7 @@ class TeamsAdapter(BasePlatformAdapter):
             title="Allow Once", verb="hermes_approve",
             data={**btn_data_base, "hermes_action": "approve_once"}, style="positive",
         )]
-        if not smart_denied and allow_session:
+        if not smart_denied:
             actions.append(ExecuteAction(
                 title="Allow Session", verb="hermes_approve",
                 data={**btn_data_base, "hermes_action": "approve_session"},

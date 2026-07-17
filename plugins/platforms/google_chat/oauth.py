@@ -199,7 +199,7 @@ def load_user_credentials(email: Optional[str] = None) -> Optional[Any]:
     except ImportError:
         logger.warning(
             "[google_chat_user_oauth] google-auth not installed; user-OAuth "
-            "attachment delivery is disabled. Run `hermes setup` to install Google Chat support."
+            "attachment delivery is disabled. Install hermes-agent[google_chat]."
         )
         return None
 
@@ -388,7 +388,8 @@ def install_deps() -> bool:
         return True
     except Exception as exc:
         print(f"ERROR: Failed to install dependencies: {exc}")
-        print("Run `hermes setup` to repair the managed installation, then retry.")
+        print("Or install via the optional extra:")
+        print("  pip install 'hermes-agent[google_chat]'")
         return False
 
 
