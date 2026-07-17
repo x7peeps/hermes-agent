@@ -431,7 +431,7 @@ def _run_references_parallel(
         # Collect every reference before returning — the aggregator needs the
         # complete set, so there is no early-exit / first-completed path here.
         for future, idx in futures.items():
-            results[idx] = future.result()
+            results[idx] = future.result(timeout=120)
 
     return [r for r in results if r is not None]
 
