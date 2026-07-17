@@ -143,7 +143,7 @@ def generate_base_drafts(
                 for pending in futures:
                     pending.cancel()
                 break
-            index, path, err = fut.result()
+            index, path, err = fut.result(timeout=300)
             if path is None:
                 if err:
                     errors.append(err)
@@ -296,7 +296,7 @@ def hatch_pet(
                 for pending in futures:
                     pending.cancel()
                 break
-            state, frames = fut.result()
+            state, frames = fut.result(timeout=300)
             done += 1
             progress("row", f"{state}:{done}:{total_rows}")
             if frames:
