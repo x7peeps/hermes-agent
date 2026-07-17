@@ -1083,7 +1083,7 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
                 proc.communicate(timeout=_CUA_INSTALLER_TIMEOUT)
             except subprocess.TimeoutExpired:
                 _kill_installer_tree(proc)
-                proc.communicate()
+                proc.communicate(timeout=30)
                 raise
             result = subprocess.CompletedProcess(
                 install_cmd, proc.returncode, stdout=None, stderr=None
@@ -1098,7 +1098,7 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
                 out, _ = proc.communicate(timeout=_CUA_INSTALLER_TIMEOUT)
             except subprocess.TimeoutExpired:
                 _kill_installer_tree(proc)
-                proc.communicate()
+                proc.communicate(timeout=30)
                 raise
             result = subprocess.CompletedProcess(
                 install_cmd, proc.returncode, stdout=out, stderr=None
