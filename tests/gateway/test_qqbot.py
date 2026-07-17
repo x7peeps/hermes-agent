@@ -2254,3 +2254,33 @@ class TestReadEventsClosedWsGuard:
         adapter._ws = None
         with pytest.raises(RuntimeError):
             asyncio.run(adapter._read_events())
+
+
+# ---------------------------------------------------------------------------
+# _run_with_concurrency — return_exceptions regression test
+# ---------------------------------------------------------------------------
+
+class TestRunWithConcurrency:
+    @pytest.mark.asyncio
+    async def test_releases_lock_on_failure(self):
+        """One coroutine raising should not leave other coroutines hanging."""
+        from gateway.platforms.qqbot.chunked_upload import _run_with_concurrency
+
+        results = []
+        sem = asyncio.Semaphore(2)
+
+        async def slow_ok(idx: int) -> None:
+            async with sem:
+                await asyncio.sleep(0.01)
+                results.append(f"ok-{idx}")
+
+        async def boom(_idx: int) -> None:
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await _run_with_concurrency(
+                [lambda: slow_ok(1), lambda: boom(2), lambda: slow_ok(3)],
+                concurrency=2,
+            )
+        # The ok coroutines should have completed despite boom failing
+        assert set(results) == {"ok-1", "ok-3"}
