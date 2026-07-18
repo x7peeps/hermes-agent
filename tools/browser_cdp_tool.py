@@ -75,7 +75,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
-def _run_async(coro):
+def _run_async(coro, *, timeout: float = 30.0):
     """Run an async coroutine from a sync handler, safe inside or outside a loop."""
     try:
         loop = asyncio.get_running_loop()
@@ -87,7 +87,7 @@ def _run_async(coro):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(asyncio.run, coro)
-            return future.result()
+            return future.result(timeout=timeout)
     return asyncio.run(coro)
 
 
@@ -497,7 +497,8 @@ def browser_cdp(
 
     try:
         result = _run_async(
-            _cdp_call(endpoint, method, call_params, target_id, safe_timeout)
+            _cdp_call(endpoint, method, call_params, target_id, safe_timeout),
+            timeout=safe_timeout + 5,
         )
     except asyncio.TimeoutError as exc:
         return tool_error(
