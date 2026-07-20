@@ -823,6 +823,132 @@ class TestGitInstallShaRef:
 
 
 # ---------------------------------------------------------------------------
+# Git install — timeout / subprocess kwargs coverage
+# ---------------------------------------------------------------------------
+
+
+class TestGitInstallTimeout:
+    """subprocess.TimeoutExpired in _do_git_install is converted to CatalogError."""
+
+    def test_branch_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """git clone --branch timeout is converted to CatalogError."""
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError, _do_git_install, get_entry
+        import subprocess
+
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": "v1.0.0",
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        def _timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _timeout_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = get_entry("demo")
+        assert entry is not None
+        with pytest.raises(CatalogError, match="timed out"):
+            _do_git_install(entry)
+
+    def test_checkout_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """git checkout timeout is converted to CatalogError."""
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError, _do_git_install, get_entry
+        import subprocess
+
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": "abc1234567890abcdef1234567890abcdef12345",
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        call_count = [0]
+
+        class _FakeProc:
+            def __init__(self):
+                self.returncode = 0
+
+        def _conditional_run(*args, **kwargs):
+            call_count[0] += 1
+            # clone succeeds, checkout times out
+            if call_count[0] == 1:
+                return _FakeProc()
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _conditional_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = get_entry("demo")
+        assert entry is not None
+        with pytest.raises(CatalogError, match="git checkout timed out"):
+            _do_git_install(entry)
+
+    def test_git_subprocess_kwargs(self, catalog_dir, monkeypatch):
+        """Verify git clone/checkout subprocess.run calls receive timeout=300
+        and stdin=subprocess.DEVNULL."""
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import _do_git_install, get_entry
+        import subprocess
+
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": "abc1234567890abcdef1234567890abcdef12345",
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        calls = []
+
+        class _FakeProc:
+            def __init__(self):
+                self.returncode = 0
+
+        def fake_run(*args, **kwargs):
+            calls.append((list(args) if args else [], kwargs))
+            return _FakeProc()
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", fake_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = get_entry("demo")
+        assert entry is not None
+        _do_git_install(entry)
+
+        for _, kwargs in calls:
+            assert kwargs.get("timeout") == 300, f"Missing timeout in call: {kwargs}"
+            assert kwargs.get("stdin") == subprocess.DEVNULL, f"Missing stdin=DEVNULL in call: {kwargs}"
+
+
+# ---------------------------------------------------------------------------
 # Existing tools_config converged to tools.include
 # ---------------------------------------------------------------------------
 
