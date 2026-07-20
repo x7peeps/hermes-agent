@@ -11223,6 +11223,7 @@ class CronJobCreate(BaseModel):
     enabled_toolsets: Optional[List[str]] = None
     workdir: Optional[str] = None
     no_agent: bool = False
+    repeat: Optional[int] = None
 
 
 class CronJobUpdate(BaseModel):
@@ -11543,6 +11544,11 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
         context_from = _cron_string_list(body.context_from)
         _validate_dashboard_cron_context_from(context_from, profile_name)
         no_agent = bool(body.no_agent)
+        if body.repeat is not None and body.repeat <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="repeat must be a positive integer",
+            )
         _validate_dashboard_cron_effective_job({
             "prompt": body.prompt,
             "skills": skills,
@@ -11565,6 +11571,7 @@ def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
             enabled_toolsets=_cron_string_list(body.enabled_toolsets),
             workdir=_cron_optional_text(body.workdir),
             no_agent=no_agent,
+            repeat=body.repeat,
         )
     except HTTPException:
         raise

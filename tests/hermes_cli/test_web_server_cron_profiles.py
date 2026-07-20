@@ -785,3 +785,45 @@ async def test_create_cron_job_without_profile_defaults_when_unscoped(
 
     assert job["profile"] == "default"
     assert (isolated_profiles["default"] / "cron" / "jobs.json").exists()
+
+
+def test_create_cron_job_preserves_finite_repeat(isolated_profiles, monkeypatch):
+    """POST /api/cron/jobs with repeat: 2 must store repeat.times == 2, not null."""
+    from hermes_cli import web_server
+
+    monkeypatch.setenv("HERMES_HOME", str(isolated_profiles["default"]))
+
+    job = web_server._create_cron_job_sync(
+        web_server.CronJobCreate(
+            prompt="run the check",
+            schedule="every 1h",
+            name="two checks",
+            repeat=2,
+        ),
+        profile=None,
+    )
+
+    assert job["repeat"] is not None
+    assert job["repeat"].get("times") == 2
+    assert job["repeat"].get("completed") == 0
+
+
+def test_create_cron_job_rejects_non_positive_repeat(isolated_profiles, monkeypatch):
+    """POST /api/cron/jobs with repeat: 0 or repeat: -1 must return HTTP 400."""
+    from hermes_cli import web_server
+
+    monkeypatch.setenv("HERMES_HOME", str(isolated_profiles["default"]))
+
+    for bad_value in (0, -1):
+        with pytest.raises(HTTPException) as exc_info:
+            web_server._create_cron_job_sync(
+                web_server.CronJobCreate(
+                    prompt="run the check",
+                    schedule="every 1h",
+                    name="bad repeat",
+                    repeat=bad_value,
+                ),
+                profile=None,
+            )
+        assert exc_info.value.status_code == 400
+        assert "positive" in exc_info.value.detail.lower()
