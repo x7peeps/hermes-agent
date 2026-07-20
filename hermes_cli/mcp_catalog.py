@@ -364,15 +364,7 @@ def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     """
     for cmd in commands:
         print(color(f"  $ {cmd}", Colors.DIM))
-        try:
-            proc = subprocess.run(
-                cmd, cwd=str(cwd), shell=True, timeout=300,
-                stdin=subprocess.DEVNULL, check=False,
-            )
-        except subprocess.TimeoutExpired:
-            raise CatalogError(
-                f"bootstrap step timed out (300s): {cmd}"
-            )
+        proc = subprocess.run(cmd, cwd=str(cwd), shell=True)
         if proc.returncode != 0:
             raise CatalogError(
                 f"bootstrap step failed (exit {proc.returncode}): {cmd}"
