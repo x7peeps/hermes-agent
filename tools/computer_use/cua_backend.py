@@ -637,6 +637,11 @@ class _CuaDriverSession:
         # Empty until the session starts; consumers should call
         # `supports_capability` rather than reading directly.
         self._capabilities: Dict[str, set] = {}
+        # Per-tool inputSchema.properties, used to detect parameter support
+        # (e.g. delivery_mode) from the live schema rather than relying solely
+        # on capability tokens — needed for cua-driver 0.9.0+ which exposes
+        # delivery_mode in the action schema but not in the capability list.
+        self._schema_properties: Dict[str, Dict[str, Any]] = {}
         self._capability_version: str = ""
         # Lifecycle plumbing — see class docstring above.
         self._ready_event = threading.Event()
@@ -739,7 +744,13 @@ class _CuaDriverSession:
     async def _populate_capabilities(self, session: Any) -> None:
         """Surface 4: cache per-tool capability sets + capability_version
         from tools/list. Soft prerequisite — discovery failure leaves
-        the map empty and supports_capability degrades to False."""
+        the map empty and supports_capability degrades to False.
+
+        Also extract inputSchema.properties so that parameter-level support
+        (e.g. delivery_mode) can be discovered from the live schema rather
+        than relying solely on capability tokens — cua-driver 0.9.0+ no
+        longer includes ``input.delivery_mode`` in the capability list.
+        """
         try:
             tools_list = await session.list_tools()
             for tool in getattr(tools_list, "tools", []) or []:
@@ -747,10 +758,10 @@ class _CuaDriverSession:
                 if not isinstance(tool_name, str):
                     continue
                 caps = getattr(tool, "capabilities", None)
+                extra = getattr(tool, "model_extra", None) or {}
                 if caps is None:
                     # Some MCP SDKs forward custom fields via
                     # `model_extra` (Pydantic v2) instead of attributes.
-                    extra = getattr(tool, "model_extra", None) or {}
                     caps = extra.get("capabilities")
                 if isinstance(caps, list):
                     self._capabilities[tool_name] = {
@@ -758,6 +769,18 @@ class _CuaDriverSession:
                     }
                 else:
                     self._capabilities[tool_name] = set()
+
+                # Extract inputSchema.properties for schema-based capability
+                # detection (issue #67783).  The MCP Tool.inputSchema is a
+                # JSON-Schema dict with a "properties" key.
+                inp = getattr(tool, "inputSchema", None) or (
+                    extra.get("inputSchema") if extra else None
+                )
+                if isinstance(inp, dict):
+                    props = inp.get("properties")
+                    if isinstance(props, dict):
+                        self._schema_properties[tool_name] = props
+
             # capability_version is a top-level sibling of `tools` on the
             # tools/list response. cua-driver-core/src/tool.rs:354 emits
             # it; cua-driver-core/src/protocol.rs:150 leaves it OUT of
@@ -867,12 +890,34 @@ class _CuaDriverSession:
         advertises the capability — useful for "is this feature available
         anywhere on the driver" probes.
 
+        As a fallback for cua-driver 0.9.0+ (issue #67783), also checks
+        the tool's ``inputSchema.properties`` for the requested parameter
+        name — if a parameter like ``delivery_mode`` exists in the schema,
+        the driver supports it even without a matching capability token.
+
         Always returns False before the session is started (so consumers
         on a dead/uninitialised wrapper degrade rather than crash).
         """
+        # Primary path: check the capability-token set.
         if tool is not None:
-            return capability in self._capabilities.get(tool, set())
-        return any(capability in caps for caps in self._capabilities.values())
+            if capability in self._capabilities.get(tool, set()):
+                return True
+        else:
+            if any(capability in caps for caps in self._capabilities.values()):
+                return True
+
+        # Fallback for cua-driver 0.9.0+ (#67783): check if the parameter
+        # exists in the tool's inputSchema.properties.  The capability
+        # vocabulary maps ``input.delivery_mode`` → schema property
+        # ``delivery_mode`` on action tools (click, type_text, drag, scroll,
+        # key).
+        if "." in capability and tool is not None:
+            schema_param = capability.split(".", 1)[1]
+            props = self._schema_properties.get(tool)
+            if props and schema_param in props:
+                return True
+
+        return False
 
     def _has_tool(self, name: str) -> bool:
         """Return True when ``tools/list`` advertised a tool by this name.
@@ -949,6 +994,7 @@ class _CuaDriverSession:
         self._started = False
         # Clear stale capability state; the next start populates from scratch.
         self._capabilities = {}
+        self._schema_properties = {}
         self._capability_version = ""
         self._start_lifecycle_locked()
         self._started = True
@@ -1372,6 +1418,28 @@ class CuaDriverBackend(ComputerUseBackend):
         self._last_app = None
         self._last_target = None
         self._snapshot_tokens = {}
+
+    def _bring_to_front(self) -> Optional[ActionResult]:
+        """Call the standalone ``bring_to_front`` MCP tool.
+
+        cua-driver 0.9.0 moved this from an action argument to a standalone
+        tool (issue #67783). Caller is expected to check ``_has_tool`` on
+        the session before invoking.  Delegates to the public
+        ``bring_to_front()`` method.
+
+        Returns None on success (to continue the action chain) or an
+        ActionResult on failure (to short-circuit).
+        """
+        pid = self._active_pid
+        if pid is None:
+            return ActionResult(
+                ok=False, action="bring_to_front",
+                message="No active window — call capture() first.",
+            )
+        res = self.bring_to_front(pid=pid, window_id=self._active_window_id)
+        if not res.ok:
+            return res
+        return None
 
     def _failed_capture(self, mode: str, message: str = "") -> CaptureResult:
         """Return an empty capture after disarming any prior target context."""
@@ -1867,12 +1935,17 @@ class CuaDriverBackend(ComputerUseBackend):
         """Attach delivery_mode to an input-action args dict.
 
         Background is the default and never needs a flag. Foreground is only
-        sent when the driver advertises support for it; on an older driver
+        sent when the driver understands it; on an older driver
         that lacks the capability we refuse with a structured
         ``foreground_unsupported`` result instead of silently downgrading to
         background (which would land the input somewhere the model didn't
         expect). Returns an ActionResult to short-circuit on refusal, or None
         to proceed. See NousResearch/hermes-agent#67052 phase B.
+
+        For cua-driver 0.9.0+ (#67783), ``bring_to_front`` is a standalone
+        MCP tool, not an argument on action tools.  When the driver does NOT
+        have a ``bring_to_front`` standalone tool (older versions), we still
+        pass it as an action argument for backward compatibility.
         """
         if not delivery_mode or delivery_mode == "background":
             return None
@@ -1895,7 +1968,16 @@ class CuaDriverBackend(ComputerUseBackend):
                 ),
             )
         args["delivery_mode"] = "foreground"
-        if bring_to_front:
+
+        # cua-driver 0.9.0+ moved bring_to_front to a standalone tool.
+        # Call it explicitly before the foreground action when the driver
+        # has the standalone tool.
+        if bring_to_front and self._session._has_tool("bring_to_front"):
+            bt_err = self._bring_to_front()
+            if bt_err is not None:
+                return bt_err
+        elif bring_to_front:
+            # Older driver: pass as arg for backward compat.
             args["bring_to_front"] = True
         return None
 
