@@ -83,6 +83,17 @@ def main():
             continue
 
         if msg.get("method") == "initialized":
+            if script in {"requests", "slow_requests"}:
+                # Send a server-to-client request to exercise the client's
+                # fire-and-forget request handler task path.
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": 9999,
+                    "method": "workspace/configuration",
+                    "params": {"items": [{"section": "test"}]},
+                })
+                if script == "slow_requests":
+                    time.sleep(5.0)  # stay long enough for the client to shut down mid-request
             continue
 
         if msg.get("method") == "workspace/didChangeConfiguration":

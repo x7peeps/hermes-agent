@@ -323,7 +323,7 @@ class LSPClient:
                     self._dispatch_response(key, msg)
                 elif kind == "request":
                     task = asyncio.create_task(self._dispatch_request(key, msg))
-                    task.add_done_callback(self._request_tasks.discard)
+                    task.add_done_callback(self._on_request_task_done)
                     self._request_tasks.add(task)
                 elif kind == "notification":
                     self._dispatch_notification(key, msg)
@@ -438,10 +438,13 @@ class LSPClient:
             await self._cleanup_process()
 
     async def _cleanup_process(self) -> None:
-        # Cancel any in-flight fire-and-forget request handler tasks.
-        for t in self._request_tasks:
-            if not t.done():
-                t.cancel()
+        # Snapshot, cancel, and await all in-flight request handler tasks
+        # before clearing the set, so cancellation actually propagates.
+        pending_tasks = [t for t in self._request_tasks if not t.done()]
+        for t in pending_tasks:
+            t.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         self._request_tasks.clear()
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
@@ -569,6 +572,35 @@ class LSPClient:
             await self._send_error_response(req_id, -32000, f"handler failed: {e}")
             return
         await self._send_response(req_id, result)
+
+    def _on_request_task_done(self, task: asyncio.Task) -> None:
+        """Done callback for fire-and-forget request handler tasks.
+
+        Removes the task from ``_request_tasks`` and logs any unexpected
+        exception that escaped the handler's own ``except Exception`` guard.
+        """
+        self._request_tasks.discard(task)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except asyncio.InvalidStateError:
+            return
+        except BaseException:
+            # Non-standard cancellation path — task.exception() re-raises
+            # the task's exception if it's a BaseException (not Exception).
+            # Log it but don't let the callback crash.
+            logger.warning(
+                "[%s] request handler task raised unexpected BaseException",
+                self.server_id,
+            )
+            return
+        if exc is not None:
+            logger.warning(
+                "[%s] request handler task raised unexpected exception: %s",
+                self.server_id,
+                exc,
+            )
 
     def _dispatch_notification(self, method: str, msg: dict) -> None:
         handler = self._notification_handlers.get(method)
