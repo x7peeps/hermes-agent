@@ -1520,11 +1520,74 @@ class SecondaryPortBindingConfigError(MultiplexConfigError):
     """A secondary profile conflicts with the multiplexer's shared listener."""
 
 
+def _resolve_profile_terminal_config(profile_home: "Path") -> Optional[Dict[str, Any]]:
+    """Read the ``terminal:`` section from a profile's own config.yaml.
+
+    Returns a flat dict of terminal settings suitable for
+    ``set_terminal_config_scope``, or ``None`` when the profile has no
+    terminal section (in which case the gateway-starting profile's env vars
+    remain the fallback).
+
+    This is a read-only, side-effect-free operation: it does NOT mutate
+    ``os.environ`` or the process-global config cache.
+    """
+    from hermes_constants import get_hermes_home
+
+    try:
+        from hermes_cli.config import read_raw_config
+    except Exception:
+        return None
+
+    saved_home = None
+    try:
+        # Temporarily override HERMES_HOME so read_raw_config loads the
+        # target profile's config.yaml instead of the default profile's.
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+        saved_home = set_hermes_home_override(str(profile_home))
+        cfg = read_raw_config()
+        terminal = cfg.get("terminal") if isinstance(cfg, dict) else None
+        if not isinstance(terminal, dict):
+            return None
+
+        # Flatten to the keys the terminal tool expects.
+        # The _get_scoped_env_config function reads these raw config.yaml keys.
+        result: Dict[str, Any] = {}
+        for k, v in terminal.items():
+            if isinstance(v, (str, int, float, bool, list, dict)) or v is None:
+                result[k] = v
+
+        # Expand ${ENV_VAR} references that may appear in values.
+        try:
+            from hermes_cli.config import _expand_env_vars
+
+            expanded = _expand_env_vars({"terminal": result})
+            if isinstance(expanded, dict):
+                result = expanded.get("terminal", result)  # type: ignore[assignment]
+        except Exception:
+            pass
+
+        return result
+    except Exception:
+        logger.debug(
+            "Failed to resolve terminal config for profile %s", profile_home, exc_info=True
+        )
+        return None
+    finally:
+        if saved_home is not None:
+            try:
+                from hermes_constants import reset_hermes_home_override
+
+                reset_hermes_home_override(saved_home)
+            except Exception:
+                pass
+
+
 @_contextmanager
 def _profile_runtime_scope(profile_home: "Path"):
-    """Scope config/skills/memory AND credentials to a profile for one turn.
+    """Scope config/skills/memory AND credentials AND terminal to a profile for one turn.
 
-    Combines the two seams the multiplexer needs:
+    Combines the three seams the multiplexer needs:
       1. ``set_hermes_home_override`` — redirects ``get_hermes_home()`` (config,
          skills, memory, SOUL, sessions) to the profile's home. Contextvar, so
          it propagates into the agent worker thread via ``copy_context()``.
@@ -1532,6 +1595,10 @@ def _profile_runtime_scope(profile_home: "Path"):
          authoritative credential source, so ``get_secret`` reads this profile's
          keys and never the process-global ``os.environ`` (which in a
          multiplexer may hold another profile's values).
+      3. ``set_terminal_config_scope`` — installs the profile's ``terminal:``
+         config section so terminal/file tools use the routed profile's backend
+         (docker/ssh/etc.) instead of inheriting the gateway-starting profile's
+         process-global ``TERMINAL_*`` env vars. See issue #68559.
 
     Only used on the multiplexed inbound path. Single-profile gateways never
     enter this scope, so their behavior is unchanged. Loading the profile's
@@ -1545,12 +1612,27 @@ def _profile_runtime_scope(profile_home: "Path"):
         set_secret_scope,
         reset_secret_scope,
     )
+    from tools.terminal_tool import (
+        set_terminal_config_scope,
+        reset_terminal_config_scope,
+    )
 
     home_token = set_hermes_home_override(str(profile_home))
     secret_token = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
+
+    # Resolve the profile's terminal config from its own config.yaml.
+    # This does NOT mutate os.environ; it returns an isolated dict that the
+    # terminal tool reads via ContextVar, so concurrent routed profile turns
+    # remain isolated.  See issue #68559.
+    terminal_cfg = _resolve_profile_terminal_config(profile_home)
+    terminal_token = (
+        set_terminal_config_scope(terminal_cfg) if terminal_cfg is not None else None
+    )
     try:
         yield
     finally:
+        if terminal_token is not None:
+            reset_terminal_config_scope(terminal_token)
         reset_secret_scope(secret_token)
         reset_hermes_home_override(home_token)
 

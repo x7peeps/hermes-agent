@@ -42,6 +42,7 @@ import threading
 import atexit
 import shutil
 import subprocess
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -1309,6 +1310,37 @@ def _is_unusable_container_cwd(cwd: str) -> bool:
 # optimization: after the first attempt either TERMINAL_ENV is set (bridge
 # succeeded — merged config always carries terminal.backend) or the import
 # failed and retrying every call would be wasted work.
+# --- Per-scope terminal configuration (ContextVar) ---------------------------
+# Allows the gateway multiplexer to override terminal settings for a routed
+# profile turn without mutating os.environ, which is process-global and unsafe
+# for concurrent multi-profile execution.  See issue #68559.
+_terminal_config_scope: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "terminal_config_scope", default=None
+)
+
+
+def set_terminal_config_scope(terminal_cfg: Dict[str, Any]) -> Any:
+    """Install a context-local terminal-config override for the current scope.
+
+    Returns an opaque token that must be passed to ``reset_terminal_config_scope``
+    to restore the previous scope.  This is the terminal analogue of
+    ``set_secret_scope`` / ``set_hermes_home_override`` used in
+    ``_profile_runtime_scope``.
+    """
+    return _terminal_config_scope.set(terminal_cfg)
+
+
+def reset_terminal_config_scope(token: Any) -> None:
+    """Restore the previous terminal-config scope using the opaque token."""
+    _terminal_config_scope.reset(token)
+
+
+def _get_terminal_config_scope() -> Optional[Dict[str, Any]]:
+    """Return the current context-local terminal config override, or None."""
+    return _terminal_config_scope.get()
+
+
+# --- Terminal config bridge fallback -----------------------------------------
 _terminal_config_bridge_attempted = False
 
 
@@ -1347,14 +1379,263 @@ def _ensure_terminal_env_bridged() -> None:
 
 
 def _get_env_config() -> Dict[str, Any]:
-    """Get terminal environment configuration from environment variables."""
-    # Default image with Python and Node.js for maximum compatibility
+    """Get terminal configuration, respecting per-scope overrides.
+
+    When a context-local terminal config scope is active (set via
+    ``set_terminal_config_scope`` by ``_profile_runtime_scope`` during
+    multiplexed gateway routing), all terminal settings come from the
+    scoped configuration dict — not from process-global ``os.environ``.
+
+    When no scope is active, falls back to the legacy environment-variable
+    path for backward compatibility with CLI/TUI/launchers.
+
+    See issue #68559.
+    """
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
+
+    # --- Scoped path: multiplexed gateway routing --------------------------
+    scoped_cfg = _get_terminal_config_scope()
+    if scoped_cfg is not None:
+        return _get_scoped_env_config(scoped_cfg, default_image)
+
+    # --- Legacy path: process-global env vars ------------------------------
     _ensure_terminal_env_bridged()
+    return _get_env_config_from_envvars(default_image)
+
+
+# Map of config.yaml key → canonical output key used by the terminal tool.
+# The legacy env-var names are embedded in the _get_env_config_from_envvars impl.
+_TERMINAL_CONFIG_KEY_MAP = {
+    "backend": "env_type",
+    "cwd": "cwd",
+    "timeout": "timeout",
+    "lifetime_seconds": "lifetime_seconds",
+    "docker_image": "docker_image",
+    "docker_forward_env": "docker_forward_env",
+    "singularity_image": "singularity_image",
+    "modal_image": "modal_image",
+    "daytona_image": "daytona_image",
+    "ssh_host": "ssh_host",
+    "ssh_user": "ssh_user",
+    "ssh_port": "ssh_port",
+    "ssh_key": "ssh_key",
+    "container_cpu": "container_cpu",
+    "container_memory": "container_memory",
+    "container_disk": "container_disk",
+    "container_persistent": "container_persistent",
+    "docker_volumes": "docker_volumes",
+    "docker_env": "docker_env",
+    "docker_extra_args": "docker_extra_args",
+    "docker_mount_cwd_to_workspace": "docker_mount_cwd_to_workspace",
+    "docker_network": "docker_network",
+    "docker_run_as_host_user": "docker_run_as_host_user",
+    "docker_persist_across_processes": "docker_persist_across_processes",
+    "docker_orphan_reaper": "docker_orphan_reaper",
+    "sandbox_dir": "sandbox_dir",
+    "persistent_shell": "persistent_shell",
+    "modal_mode": "modal_mode",
+    "home_mode": "home_mode",
+}
+
+# Default values for scoped config resolution
+_SCOPED_DEFAULTS: Dict[str, Any] = {
+    "env_type": "local",
+    "modal_mode": "auto",
+    "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+    "docker_forward_env": [],
+    "singularity_image": None,  # derived below
+    "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+    "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+    "cwd": None,  # resolved below
+    "host_cwd": None,
+    "docker_mount_cwd_to_workspace": False,
+    "timeout": 180,
+    "lifetime_seconds": 300,
+    "ssh_host": "",
+    "ssh_user": "",
+    "ssh_port": 22,
+    "ssh_key": "",
+    "ssh_persistent": True,
+    "local_persistent": False,
+    "container_cpu": 1.0,
+    "container_memory": 5120,
+    "container_disk": 51200,
+    "container_persistent": True,
+    "docker_volumes": [],
+    "docker_env": {},
+    "docker_run_as_host_user": False,
+    "docker_network": True,
+    "docker_extra_args": [],
+    "docker_persist_across_processes": True,
+    "docker_orphan_reaper": True,
+    "sandbox_dir": None,
+    "persistent_shell": None,
+    "home_mode": False,
+}
+
+
+def _bool_from_scoped(val: Any, default: bool = False) -> bool:
+    """Convert a scoped config value (str, bool, int) to a boolean."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return str(val).strip().lower() in {"true", "1", "yes"}
+
+
+def _int_from_scoped(val: Any, default: int) -> int:
+    """Convert a scoped config value to an integer."""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _float_from_scoped(val: Any, default: float) -> float:
+    """Convert a scoped config value to a float."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _get_scoped_env_config(scoped_cfg: Dict[str, Any], default_image: str) -> Dict[str, Any]:
+    """Build terminal config dict from a scoped configuration.
+
+    This mirrors the logic of ``_get_env_config_from_envvars`` but reads
+    from a dict instead of from environment variables.
+    """
+    env_type = str(scoped_cfg.get("backend", "local")).strip().lower() or "local"
+    container_backend = env_type in _CONTAINER_BACKENDS
+    docker_backend = env_type == "docker"
+
+    # Container resource defaults
+    if container_backend:
+        container_cpu = _float_from_scoped(scoped_cfg.get("container_cpu"), 1.0)
+        container_memory = _int_from_scoped(scoped_cfg.get("container_memory"), 5120)
+        container_disk = _int_from_scoped(scoped_cfg.get("container_disk"), 51200)
+    else:
+        container_cpu = 1.0
+        container_memory = 5120
+        container_disk = 51200
+
+    # Docker-specific collections
+    if docker_backend:
+        docker_forward_env = scoped_cfg.get("docker_forward_env", [])
+        docker_volumes = scoped_cfg.get("docker_volumes", [])
+        docker_env = scoped_cfg.get("docker_env", {})
+        docker_extra_args = scoped_cfg.get("docker_extra_args", [])
+        if isinstance(docker_forward_env, str):
+            try:
+                docker_forward_env = json.loads(docker_forward_env)
+            except json.JSONDecodeError:
+                docker_forward_env = []
+        if isinstance(docker_volumes, str):
+            try:
+                docker_volumes = json.loads(docker_volumes)
+            except json.JSONDecodeError:
+                docker_volumes = []
+        if isinstance(docker_env, str):
+            try:
+                docker_env = json.loads(docker_env)
+            except json.JSONDecodeError:
+                docker_env = {}
+        if isinstance(docker_extra_args, str):
+            try:
+                docker_extra_args = json.loads(docker_extra_args)
+            except json.JSONDecodeError:
+                docker_extra_args = []
+    else:
+        docker_forward_env = []
+        docker_volumes = []
+        docker_env = {}
+        docker_extra_args = []
+
+    # CWD resolution
+    if env_type == "local":
+        default_cwd = _safe_getcwd()
+    elif env_type == "ssh":
+        default_cwd = "~"
+    else:
+        default_cwd = "/root"
+
+    mount_docker_cwd = _bool_from_scoped(scoped_cfg.get("docker_mount_cwd_to_workspace"), False)
+    raw_cwd = scoped_cfg.get("cwd")
+
+    if raw_cwd is not None:
+        cwd = str(raw_cwd)
+    else:
+        cwd = default_cwd
+
+    if cwd and not _is_ssh_remote_tilde_cwd(env_type, cwd):
+        cwd = os.path.expanduser(cwd)
+
+    host_cwd = None
+    if docker_backend and mount_docker_cwd:
+        docker_cwd_source = str(scoped_cfg.get("cwd", "")) or _safe_getcwd()
+        candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
+        if (
+            any(candidate.startswith(p) for p in _HOST_CWD_PREFIXES)
+            or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
+        ):
+            host_cwd = candidate
+            cwd = "/workspace"
+    elif container_backend and cwd:
+        if _is_unusable_container_cwd(cwd) and cwd != default_cwd:
+            logger.info("Ignoring cwd=%r for %s backend "
+                        "(host/relative path won't work in sandbox). Using %r instead.",
+                        cwd, env_type, default_cwd)
+            cwd = default_cwd
+
+    singularity_image = scoped_cfg.get("singularity_image")
+    if singularity_image is None:
+        singularity_image = f"docker://{scoped_cfg.get('docker_image', default_image)}"
+
+    return {
+        "env_type": env_type,
+        "modal_mode": coerce_modal_mode(scoped_cfg.get("modal_mode", "auto")),
+        "docker_image": scoped_cfg.get("docker_image", default_image),
+        "docker_forward_env": docker_forward_env if isinstance(docker_forward_env, list) else [],
+        "singularity_image": singularity_image,
+        "modal_image": scoped_cfg.get("modal_image", default_image),
+        "daytona_image": scoped_cfg.get("daytona_image", default_image),
+        "cwd": cwd,
+        "host_cwd": host_cwd,
+        "docker_mount_cwd_to_workspace": mount_docker_cwd,
+        "timeout": _int_from_scoped(scoped_cfg.get("timeout"), 180),
+        "lifetime_seconds": _int_from_scoped(scoped_cfg.get("lifetime_seconds"), 300),
+        "ssh_host": str(scoped_cfg.get("ssh_host", "")),
+        "ssh_user": str(scoped_cfg.get("ssh_user", "")),
+        "ssh_port": _int_from_scoped(scoped_cfg.get("ssh_port"), 22),
+        "ssh_key": str(scoped_cfg.get("ssh_key", "")),
+        "ssh_persistent": _bool_from_scoped(
+            scoped_cfg.get("ssh_persistent"),
+            scoped_cfg.get("persistent_shell", True),
+        ),
+        "local_persistent": _bool_from_scoped(scoped_cfg.get("local_persistent"), False),
+        "container_cpu": container_cpu,
+        "container_memory": container_memory,
+        "container_disk": container_disk,
+        "container_persistent": _bool_from_scoped(scoped_cfg.get("container_persistent"), True),
+        "docker_volumes": docker_volumes if isinstance(docker_volumes, list) else [],
+        "docker_env": docker_env if isinstance(docker_env, dict) else {},
+        "docker_run_as_host_user": _bool_from_scoped(scoped_cfg.get("docker_run_as_host_user"), False),
+        "docker_network": _bool_from_scoped(scoped_cfg.get("docker_network"), True),
+        "docker_extra_args": docker_extra_args if isinstance(docker_extra_args, list) else [],
+        "docker_persist_across_processes": _bool_from_scoped(scoped_cfg.get("docker_persist_across_processes"), True),
+        "docker_orphan_reaper": _bool_from_scoped(scoped_cfg.get("docker_orphan_reaper"), True),
+        "sandbox_dir": scoped_cfg.get("sandbox_dir"),
+        "persistent_shell": scoped_cfg.get("persistent_shell"),
+        "home_mode": _bool_from_scoped(scoped_cfg.get("home_mode"), False),
+    }
+
+
+def _get_env_config_from_envvars(default_image: str) -> Dict[str, Any]:
+    """Legacy env-var-based terminal config (backward-compatible path)."""
     env_type = os.getenv("TERMINAL_ENV", "local")
-    
+
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
-    container_backend = env_type in {"docker", "singularity", "modal", "daytona"}
+    container_backend = env_type in _CONTAINER_BACKENDS
     docker_backend = env_type == "docker"
 
     # Docker/container-only env vars may be bridged from config.yaml even when
