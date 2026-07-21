@@ -15,11 +15,13 @@ Exit code conventions:
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -106,6 +108,25 @@ def _drive_health_report(
         bufsize=1,
         env=_sanitized_cua_env(),
     )
+
+    # Drain stderr concurrently into a bounded buffer so it never blocks
+    # the child (avoiding the pipe-deadlock that motivated this PR) while
+    # keeping stdout clean for the JSON-RPC protocol channel.
+    stderr_tail: collections.deque = collections.deque(maxlen=10)
+
+    def _drain_stderr() -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                if line:
+                    stderr_tail.append(line.rstrip("\n"))
+        except (OSError, ValueError):
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     try:
         # 1. initialize
         proc.stdin.write(json.dumps({
@@ -115,10 +136,10 @@ def _drive_health_report(
         proc.stdin.flush()
         init_line = proc.stdout.readline()
         if not init_line:
-            stderr_tail = (proc.stderr.read() or "").strip().splitlines()[-3:]
+            tail = list(stderr_tail)
             raise RuntimeError(
                 f"cua-driver mcp produced no initialize response. "
-                f"stderr tail: {stderr_tail or '(empty)'}"
+                f"stderr tail: {tail or '(empty)'}"
             )
 
         # 2. tools/call health_report
@@ -130,7 +151,11 @@ def _drive_health_report(
         proc.stdin.flush()
         call_line = proc.stdout.readline()
         if not call_line:
-            raise RuntimeError("cua-driver mcp closed stdout without responding to health_report.")
+            tail = list(stderr_tail)
+            raise RuntimeError(
+                f"cua-driver mcp closed stdout without responding to health_report. "
+                f"stderr tail: {tail or '(empty)'}"
+            )
     finally:
         try:
             proc.stdin.close()
@@ -141,6 +166,8 @@ def _drive_health_report(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # Give the stderr drain thread a moment to finish reading
+        stderr_thread.join(timeout=2)
 
     try:
         resp = json.loads(call_line)

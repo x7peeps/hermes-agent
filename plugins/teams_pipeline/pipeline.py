@@ -504,16 +504,7 @@ class TeamsMeetingPipeline:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        except (asyncio.TimeoutError, TimeoutError):
-            # Terminate the hung ffmpeg child before propagating
-            try:
-                proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except Exception:
-                pass
-            raise TeamsPipelineRetryableError("ffmpeg audio extraction timed out after 120s")
+        _stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
             raise TeamsPipelineRetryableError(f"ffmpeg audio extraction failed: {detail}")

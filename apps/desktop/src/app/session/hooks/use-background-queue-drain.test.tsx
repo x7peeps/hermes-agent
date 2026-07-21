@@ -2,9 +2,8 @@ import { act, cleanup, render, waitFor } from '@testing-library/react'
 import type { MutableRefObject } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createClientSessionState } from '@/lib/chat-runtime'
 import { $queuedPromptsBySession, enqueueQueuedPrompt, getQueuedPrompts } from '@/store/composer-queue'
-import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
+import { $workingSessionIds } from '@/store/session'
 
 import { useBackgroundQueueDrain } from './use-background-queue-drain'
 import type { SubmitTextOptions } from './use-prompt-actions/utils'
@@ -33,7 +32,6 @@ function Harness({
 describe('useBackgroundQueueDrain', () => {
   beforeEach(() => {
     vi.useRealTimers()
-    clearAllSessionStates()
   })
 
   afterEach(() => {
@@ -41,7 +39,7 @@ describe('useBackgroundQueueDrain', () => {
     vi.restoreAllMocks()
     vi.useRealTimers()
     $queuedPromptsBySession.set({})
-    clearAllSessionStates()
+    $workingSessionIds.set([])
   })
 
   it('drains an idle queued prompt for a non-selected background session', async () => {
@@ -49,7 +47,7 @@ describe('useBackgroundQueueDrain', () => {
     const submitText = vi.fn(async () => true)
 
     enqueueQueuedPrompt('stored-session-a', { text: 'continue in the background', attachments: [] })
-    clearAllSessionStates()
+    $workingSessionIds.set([])
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
@@ -70,7 +68,7 @@ describe('useBackgroundQueueDrain', () => {
     const submitText = vi.fn(async () => true)
 
     enqueueQueuedPrompt('stored-session-a', { text: 'visible queue entry', attachments: [] })
-    clearAllSessionStates()
+    $workingSessionIds.set([])
 
     render(<Harness runtimeMap={runtimeMap} selectedStoredSessionId="stored-session-a" submitText={submitText} />)
 
@@ -85,8 +83,7 @@ describe('useBackgroundQueueDrain', () => {
     const submitText = vi.fn(async () => true)
 
     enqueueQueuedPrompt('stored-session-a', { text: 'wait for current turn', attachments: [] })
-    // Mark the session as working (busy) so the drain should skip it
-    publishSessionState('rt-session-a', { ...createClientSessionState('stored-session-a'), busy: true })
+    $workingSessionIds.set(['stored-session-a'])
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
