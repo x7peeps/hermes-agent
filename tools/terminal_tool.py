@@ -722,9 +722,20 @@ def _rewrite_compound_background(command: str) -> str:
     and exits immediately. B runs as a normal backgrounded child, orphaned
     when the parent shell exits.
 
+    Two additional cases are also handled (fixes for bugs introduced or
+    missed by the original rewriter):
+
+    1. Parenthesised subshells ``(A && B) &`` have the same bug class.
+       These are now rewritten to ``{ A && B & }``.
+    2. When a backgrounded compound is followed by a subsequent command
+       on the same line (``A && B & C``), the rewrite inserts a ``;``
+       after the brace group (``A && { B & }; C``) so that bash parses
+       it as valid syntax instead of ``A && { B & } C`` which errors
+       with ``syntax error near unexpected token``.
+
     Handles redirects (``&>``, ``2>&1``) and skips content inside quoted
-    strings and parenthesised subshells. Leaves simple ``cmd &`` alone —
-    that construct doesn't have the subshell-wait bug.
+    strings. Leaves simple ``cmd &`` alone — that construct doesn't have
+    the subshell-wait bug.
     """
     n = len(command)
     i = 0
@@ -733,7 +744,8 @@ def _rewrite_compound_background(command: str) -> str:
     # Position in *command* just after the most recent `&&` / `||` at depth 0
     # in the current statement; -1 when no chain operator is active.
     last_chain_op_end = -1
-    rewrites: list[tuple[int, int]] = []  # (chain_op_end, amp_pos)
+    # (chain_op_end, amp_pos) — insert `{ ` before inner cmd, replace `&` with `& }`.
+    rewrites: list[tuple[int, int]] = []
 
     while i < n:
         ch = command[i]
@@ -796,8 +808,7 @@ def _rewrite_compound_background(command: str) -> str:
             continue
 
         # Inside parens or brace groups, skip operators — they parse in their
-        # own scope. `(...)` subshells have the same bug class but are not the
-        # common agent pattern; leave for a follow-up.
+        # own scope.
         if paren_depth > 0 or brace_depth > 0:
             i += 1
             continue
@@ -847,23 +858,122 @@ def _rewrite_compound_background(command: str) -> str:
         _, next_i = _read_shell_token(command, i)
         i = max(next_i, i + 1)
 
-    if not rewrites:
+    # --- Parenthesised subshell rewriting ---
+    # Scan for `(...) &` at depth 0 where the interior contains `&&` or `||`.
+    # These have the same subshell-wait bug: `(A && B) &` backgrounds a
+    # subshell that waits for B to finish. Rewrite to `{ A && B & }`.
+    # (open_paren_pos, close_paren_pos, amp_pos)
+    paren_rewrites: list[tuple[int, int, int]] = []
+    depth = 0
+    paren_open_pos = -1
+    i = 0
+    while i < n:
+        ch = command[i]
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                paren_open_pos = i
+            i += 1
+            continue
+        if ch == ")":
+            if depth == 1:
+                # Check if the next non-space char after `)` is `&` (not `&>`)
+                j = i + 1
+                while j < n and command[j].isspace():
+                    j += 1
+                if j < n and command[j] == "&":
+                    if j + 1 < n and command[j + 1] == ">":
+                        pass  # `&>` redirect, not background
+                    else:
+                        # Found `(...) &` — check if interior has `&&` or `||`
+                        interior = command[paren_open_pos + 1 : i]
+                        if "&&" in interior or "||" in interior:
+                            paren_rewrites.append((paren_open_pos, i, j))
+                paren_open_pos = -1
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if ch == "'" or ch == '"':
+            _, next_i = _read_shell_token(command, i)
+            i = max(next_i, i + 1)
+            continue
+        i += 1
+
+    if not rewrites and not paren_rewrites:
         return command
 
-    # Apply rewrites back-to-front so earlier indices remain valid.
+    # Merge brace rewrites and paren rewrites into a unified list,
+    # sorted by the *start* position descending so we apply back-to-front.
+    # Each item: (sort_pos, kind, data...)
+    #   kind="brace": (sort_pos, "brace", chain_end, amp_pos)
+    #   kind="paren": (sort_pos, "paren", open_pos, close_pos, amp_pos)
+    all_rewrites: list[tuple] = []
+    for chain_end, amp_pos in rewrites:
+        all_rewrites.append((amp_pos, "brace", chain_end, amp_pos))
+    for open_pos, close_pos, amp_pos in paren_rewrites:
+        all_rewrites.append((amp_pos, "paren", open_pos, close_pos, amp_pos))
+
+    all_rewrites.sort(key=lambda r: r[0], reverse=True)
+
+    # Deduplicate: skip a paren rewrite if its range overlaps with a brace
+    # rewrite that already covers the same `&` operator.
+    filtered: list[tuple] = []
+    for item in all_rewrites:
+        kind = item[1]
+        amp_pos = item[3] if kind == "paren" else item[3]
+        # Check for overlap: a paren rewrite overlaps a brace rewrite if
+        # the paren's `&` position is within the brace rewrite's range.
+        overlap = False
+        for other in filtered:
+            if other[1] == "brace" and other[3] == amp_pos:
+                overlap = True
+                break
+            if other[1] == "paren" and other[4] == amp_pos:
+                overlap = True
+                break
+        if not overlap:
+            filtered.append(item)
+
     result = command
-    for chain_end, amp_pos in reversed(rewrites):
-        # Skip whitespace right after the `&&`/`||` so the brace group
-        # opens flush against the inner command.
-        insert_pos = chain_end
-        while insert_pos < amp_pos and result[insert_pos].isspace():
-            insert_pos += 1
-        prefix = result[:insert_pos]
-        middle = result[insert_pos:amp_pos]  # inner command + trailing space
-        suffix = result[amp_pos + 1 :]
-        # `{` needs a trailing space in bash; the closing `}` needs to be
-        # preceded by `;` or `&` — we're providing `&` from the backgrounding.
-        result = prefix + "{ " + middle + "& }" + suffix
+    for item in filtered:
+        kind = item[1]
+
+        if kind == "brace":
+            _, _kind, chain_end, amp_pos = item
+            # Skip whitespace right after the `&&`/`||` so the brace group
+            # opens flush against the inner command.
+            insert_pos = chain_end
+            while insert_pos < amp_pos and result[insert_pos].isspace():
+                insert_pos += 1
+            prefix = result[:insert_pos]
+            middle = result[insert_pos:amp_pos]  # inner command + trailing space
+            suffix = result[amp_pos + 1 :]
+            # Check if suffix has a command on the same line after `&`.
+            # A newline in the suffix means the next thing is on a new line.
+            first_line = suffix.split("\n", 1)[0]
+            needs_semicolon = bool(first_line.strip())
+            if needs_semicolon:
+                result = prefix + "{ " + middle + "& }; " + first_line.lstrip()
+                # Preserve anything after the newline
+                rest = suffix[len(first_line):]
+                result += rest
+            else:
+                result = prefix + "{ " + middle + "& }" + suffix
+
+        elif kind == "paren":
+            _, _kind, open_pos, close_pos, amp_pos = item
+            prefix = result[:open_pos]
+            inner = result[open_pos + 1 : close_pos]
+            suffix = result[amp_pos + 1 :]
+            # Rewrite `(inner) &` → `{ inner & }`
+            first_line = suffix.split("\n", 1)[0]
+            needs_semicolon = bool(first_line.strip())
+            if needs_semicolon:
+                result = prefix + "{ " + inner.strip() + " & }; " + first_line.lstrip()
+                rest = suffix[len(first_line):]
+                result += rest
+            else:
+                result = prefix + "{ " + inner.strip() + " & }" + suffix
 
     return result
 
