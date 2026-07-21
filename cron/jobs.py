@@ -39,7 +39,7 @@ from typing import Optional, Dict, List, Any, Set, Tuple, Union
 logger = logging.getLogger(__name__)
 
 from hermes_time import now as _hermes_now
-from utils import atomic_replace
+from utils import atomic_replace, _preserve_file_owner, _restore_file_owner
 
 try:
     from croniter import croniter
@@ -911,14 +911,19 @@ def _save_jobs_unlocked(jobs: List[Dict[str, Any]]):
     """Save all jobs to storage. Caller must hold _jobs_lock()."""
     jobs_file = _current_cron_store().jobs_file
     ensure_dirs()
+    # Capture the original owner (uid/gid) before writing so a privileged
+    # caller (e.g. root via `docker exec`) doesn't permanently steal the
+    # file from the unprivileged gateway ticker (uid 1000). (#68483)
+    original_owner = _preserve_file_owner(jobs_file)
     fd, tmp_path = tempfile.mkstemp(dir=str(jobs_file.parent), suffix='.tmp', prefix='.jobs_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        atomic_replace(tmp_path, jobs_file)
+        real_path = atomic_replace(tmp_path, jobs_file)
         _secure_file(jobs_file)
+        _restore_file_owner(Path(real_path), original_owner)
     except BaseException:
         try:
             os.unlink(tmp_path)
