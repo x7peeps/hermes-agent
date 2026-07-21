@@ -79,12 +79,7 @@ def _run(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess
 
 
 def _json_out(binary: str, *args: str, timeout: float) -> Any:
-    """Run ``binary args`` and parse stdout as JSON.
-
-    Returns ``None`` on malformed or empty JSON output.
-    May raise ``subprocess.*`` exceptions (TimeoutExpired, FileNotFoundError)
-    on spawn/execution failures — callers must handle those explicitly.
-    """
+    """Run ``binary args`` and parse stdout as JSON, or ``None`` on any failure."""
     raw = (_run(binary, *args, timeout=timeout).stdout or "").strip()
     return json.loads(raw) if raw else None
 
