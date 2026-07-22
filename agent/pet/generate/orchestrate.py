@@ -190,8 +190,7 @@ def _humanize_image_error(error: str) -> str:
     if "rate limit" in low or "429" in low:
         return "The image provider is rate-limiting — wait a moment and try again."
     # Otherwise the first line, trimmed of the noisy provider envelope.
-    lines = error.splitlines()
-    return lines[0].strip()[:200] if lines else error.strip()[:200]
+    return error.splitlines()[0].strip()[:200]
 
 
 def hatch_pet(
