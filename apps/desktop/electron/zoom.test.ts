@@ -6,17 +6,16 @@
 
 import assert from 'node:assert/strict'
 
-import { test, vi } from 'vitest'
+import { test } from 'vitest'
 
 import {
   applyZoomLevel,
   clampZoomLevel,
   installZoomReassertOnWindowEvents,
   percentToZoomLevel,
-  ZOOM_RESIZE_REASSERT_DELAY_MS,
+  ZOOM_REASSERT_WINDOW_EVENTS,
   ZOOM_STORAGE_KEY,
   zoomLevelToPercent,
-  zoomReassertWindowEvents,
   zoomWiringForWindowKind
 } from './zoom'
 
@@ -65,7 +64,7 @@ test('extreme percentages clamp to the level bounds', () => {
   assert.equal(percentToZoomLevel(1_000_000), 9)
 })
 
-test('installZoomReassertOnWindowEvents wires show, restore, resize, and cross-display moves on macOS and Windows', () => {
+test('installZoomReassertOnWindowEvents wires show and restore', () => {
   const handlers = new Map()
 
   const win = {
@@ -76,62 +75,14 @@ test('installZoomReassertOnWindowEvents wires show, restore, resize, and cross-d
   }
 
   let calls = 0
-  installZoomReassertOnWindowEvents(
-    win,
-    () => {
-      calls += 1
-    },
-    'win32'
-  )
+  installZoomReassertOnWindowEvents(win, () => {
+    calls += 1
+  })
 
-  assert.deepEqual([...handlers.keys()], zoomReassertWindowEvents('win32'))
+  assert.deepEqual([...handlers.keys()], [...ZOOM_REASSERT_WINDOW_EVENTS])
   handlers.get('show')()
   handlers.get('restore')()
-  handlers.get('resized')()
-  handlers.get('moved')()
-  assert.equal(calls, 4)
-})
-
-test('installZoomReassertOnWindowEvents debounces Linux resize and move events at the trailing edge', () => {
-  vi.useFakeTimers()
-
-  try {
-    const handlers = new Map()
-    let destroyed = false
-
-    const win = {
-      isDestroyed: () => destroyed,
-      on(event, listener) {
-        handlers.set(event, listener)
-      }
-    }
-
-    let calls = 0
-
-    installZoomReassertOnWindowEvents(
-      win,
-      () => {
-        calls += 1
-      },
-      'linux'
-    )
-
-    assert.deepEqual([...handlers.keys()], zoomReassertWindowEvents('linux'))
-    handlers.get('resize')()
-    vi.advanceTimersByTime(ZOOM_RESIZE_REASSERT_DELAY_MS / 2)
-    handlers.get('move')()
-    vi.advanceTimersByTime(ZOOM_RESIZE_REASSERT_DELAY_MS / 2)
-    assert.equal(calls, 0)
-    vi.advanceTimersByTime(ZOOM_RESIZE_REASSERT_DELAY_MS / 2)
-    assert.equal(calls, 1)
-
-    handlers.get('resize')()
-    destroyed = true
-    vi.advanceTimersByTime(ZOOM_RESIZE_REASSERT_DELAY_MS)
-    assert.equal(calls, 1)
-  } finally {
-    vi.useRealTimers()
-  }
+  assert.equal(calls, 2)
 })
 
 test('installZoomReassertOnWindowEvents skips destroyed windows', () => {

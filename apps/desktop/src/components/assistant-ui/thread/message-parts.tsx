@@ -84,8 +84,7 @@ const ThinkingDisclosure: FC<{
       el.scrollTop = el.scrollHeight
     }
 
-    // No sync pin(): the observer's guaranteed initial delivery runs it with
-    // layout already clean (still before paint), avoiding a forced reflow.
+    pin()
     const observer = new ResizeObserver(pin)
     observer.observe(content)
 

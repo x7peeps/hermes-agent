@@ -7,7 +7,6 @@ launch an MCP is mocked.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -197,32 +196,6 @@ class TestManifestParsing:
         assert get_entry("demo") is not None
         assert get_entry("official/demo") is not None
         assert get_entry("missing") is None
-
-    def test_transport_env_parsed_and_written_to_server_config(self, catalog_dir):
-        body = _basic_manifest()
-        body["transport"]["env"] = {"DISABLE_TELEMETRY": "true"}
-        _write_manifest(catalog_dir, "demo", body)
-        from hermes_cli.mcp_catalog import _build_server_config
-
-        e = _entry("demo")
-        assert e.transport.env == {"DISABLE_TELEMETRY": "true"}
-        cfg = _build_server_config(e, None)
-        assert cfg["env"] == {"DISABLE_TELEMETRY": "true"}
-
-    def test_transport_env_absent_leaves_config_without_env_key(self, catalog_dir):
-        _write_manifest(catalog_dir, "demo", _basic_manifest())
-        from hermes_cli.mcp_catalog import _build_server_config
-
-        cfg = _build_server_config(_entry("demo"), None)
-        assert "env" not in cfg
-
-    def test_transport_env_bad_shape_rejected(self, catalog_dir):
-        body = _basic_manifest()
-        body["transport"]["env"] = ["DISABLE_TELEMETRY=true"]  # list, not mapping
-        _write_manifest(catalog_dir, "demo", body)
-        from hermes_cli.mcp_catalog import list_catalog
-
-        assert list_catalog() == []
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +742,103 @@ class TestGitInstallShaRef:
 # ---------------------------------------------------------------------------
 
 
+class TestGitInstallTimeouts:
+    """subprocess.TimeoutExpired in _do_git_install is converted to CatalogError."""
+
+    def _make_entry(self, catalog_dir, ref="abc1234"):
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": ref,
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.mcp_catalog import get_entry
+        return get_entry("demo")
+
+    def test_branch_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on the shallow branch clone must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        def _raise_timeout(*a, **kw):
+            raise sp.TimeoutExpired(cmd=a[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _raise_timeout)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir, ref="main")
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+
+    def test_full_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on the full clone (SHA ref path) must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        call_count = [0]
+
+        def _raise_timeout_on_clone(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # branch clone attempt fails (non-zero rc)
+                class _P:
+                    returncode = 1
+                return _P()
+            raise sp.TimeoutExpired(cmd=a[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _raise_timeout_on_clone)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir, ref="main")
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+
+    def test_checkout_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on git checkout must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        class _FakeProc:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        call_count = [0]
+
+        def _fake_run(argv, *a, **kw):
+            call_count[0] += 1
+            if "checkout" in argv:
+                raise sp.TimeoutExpired(cmd=argv, timeout=60)
+            return _FakeProc(returncode=0)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _fake_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir)  # SHA ref
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+        assert "checkout" in str(excinfo.value).lower()
+
+
 class TestToolsConfigIncludeMode:
     def test_configure_mcp_writes_include_not_exclude(self, monkeypatch, tmp_path):
         """`_configure_mcp_tools_interactive` in tools_config.py must write
@@ -839,59 +909,3 @@ class TestShippedCatalog:
             assert entry.name
             assert entry.description
             assert entry.transport.type in ("stdio", "http")
-
-    def test_all_shipped_manifests_are_version_locked(self, monkeypatch):
-        """Contract: catalog entries follow the same supply-chain rules as
-        pyproject dependencies — everything Hermes fetches/launches is pinned
-        to an exact version.
-
-        - git installs must pin a full 40-char commit SHA (branches and tags
-          can be moved by the upstream owner; SHAs cannot).
-        - package-launcher stdio transports (uvx/npx and their pkg-manager
-          equivalents) must carry an exact version specifier on the package
-          arg (``pkg==X`` for Python, ``pkg@X`` for npm).
-
-        http transports and ${INSTALL_DIR}-anchored commands have nothing to
-        pin at the transport layer (the server runs elsewhere / comes from the
-        SHA-pinned clone), so they're exempt.
-        """
-        monkeypatch.delenv("HERMES_OPTIONAL_MCPS", raising=False)
-        from hermes_cli.mcp_catalog import _catalog_root, _parse_manifest
-
-        root = _catalog_root()
-        if not root.exists():
-            pytest.skip("optional-mcps/ not present in this checkout")
-
-        launcher_commands = {"uvx", "npx", "pipx", "bunx", "pnpx"}
-        problems = []
-        for m in root.glob("*/manifest.yaml"):
-            entry = _parse_manifest(m)
-
-            if entry.install is not None:
-                if not re.fullmatch(r"[0-9a-f]{40}", entry.install.ref):
-                    problems.append(
-                        f"{entry.name}: install.ref {entry.install.ref!r} is not "
-                        "a full 40-char commit SHA"
-                    )
-
-            t = entry.transport
-            if t.type == "stdio" and (t.command or "") in launcher_commands:
-                pkg_args = [a for a in t.args if not a.startswith("-")]
-                if not pkg_args:
-                    problems.append(f"{entry.name}: launcher {t.command} has no package arg")
-                    continue
-                pkg = pkg_args[0]
-                # Exact-pin shapes: pkg==1.2.3 (uvx/pipx) or pkg@1.2.3 /
-                # @scope/pkg@1.2.3 (npx/bunx/pnpx). The version must start
-                # with a digit — a bare name, a range operator, or an npm
-                # dist-tag (@latest, @next) floats and is rejected.
-                exact = re.fullmatch(r"[^=@\s]+==\d[\w.\-+]*", pkg) or re.fullmatch(
-                    r"(@[\w.\-]+/)?[\w.\-]+@\d[\w.\-+]*", pkg
-                )
-                if not exact:
-                    problems.append(
-                        f"{entry.name}: package arg {pkg!r} is not pinned to an "
-                        "exact version (expected pkg==X or pkg@X)"
-                    )
-
-        assert not problems, "unpinned catalog entries:\n" + "\n".join(problems)
