@@ -3825,11 +3825,7 @@ def _spawn_detached_gateway() -> bool:
     err_path = log_dir / "gateway.error.log"
     try:
         out = open(out_path, "ab")
-        try:
-            err = open(err_path, "ab")
-        except OSError:
-            out.close()
-            raise
+        err = open(err_path, "ab")
     except OSError:
         return False
     try:
