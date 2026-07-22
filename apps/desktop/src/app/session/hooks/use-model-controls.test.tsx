@@ -3,15 +3,7 @@ import { cleanup, render, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getGlobalModelInfo } from '@/hermes'
-import {
-  $activeSessionId,
-  $currentModel,
-  $currentProvider,
-  getCurrentModelSource,
-  setCurrentModel,
-  setCurrentModelSource,
-  setCurrentProvider
-} from '@/store/session'
+import { $activeSessionId, $currentModel, $currentProvider, setCurrentModel, setCurrentProvider } from '@/store/session'
 
 import { useModelControls } from './use-model-controls'
 
@@ -40,13 +32,16 @@ vi.mock('@/store/notifications', () => ({
 type Controls = ReturnType<typeof useModelControls>
 
 function Harness({
+  activeSessionId,
   onReady,
   requestGateway
 }: {
+  activeSessionId: string | null
   onReady: (controls: Controls) => void
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
 }) {
   const controls = useModelControls({
+    activeSessionId,
     queryClient: new QueryClient(),
     requestGateway
   })
@@ -60,7 +55,6 @@ describe('useModelControls', () => {
   beforeEach(() => {
     $activeSessionId.set(null)
     setCurrentModel('')
-    setCurrentModelSource('')
     setCurrentProvider('')
   })
 
@@ -69,7 +63,6 @@ describe('useModelControls', () => {
     vi.restoreAllMocks()
     $activeSessionId.set(null)
     setCurrentModel('')
-    setCurrentModelSource('')
     setCurrentProvider('')
   })
 
@@ -81,6 +74,7 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
+        activeSessionId: null,
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -90,7 +84,6 @@ describe('useModelControls', () => {
 
     expect($currentModel.get()).toBe('openai/gpt-5.5')
     expect($currentProvider.get()).toBe('openai-codex')
-    expect(getCurrentModelSource()).toBe('default')
   })
 
   it('does not clobber the active session footer state with global model info', async () => {
@@ -104,6 +97,7 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
+        activeSessionId: 'runtime-1',
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -116,11 +110,12 @@ describe('useModelControls', () => {
   })
 
   it('routes active-session picker changes through config.set with an explicit session-scoped provider', async () => {
-    $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'claude-sonnet-4.6' }) as never)
     let controls!: Controls
 
-    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+    render(
+      <Harness activeSessionId="session-1" onReady={value => (controls = value)} requestGateway={requestGateway} />
+    )
 
     await expect(
       controls.selectModel({
@@ -138,11 +133,12 @@ describe('useModelControls', () => {
   })
 
   it('session-scopes MoA preset selections so they cannot persist as the global gateway default', async () => {
-    $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'BeastMode' }) as never)
     let controls!: Controls
 
-    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+    render(
+      <Harness activeSessionId="session-1" onReady={value => (controls = value)} requestGateway={requestGateway} />
+    )
 
     await expect(
       controls.selectModel({
@@ -162,7 +158,7 @@ describe('useModelControls', () => {
     const requestGateway = vi.fn()
     let controls!: Controls
 
-    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+    render(<Harness activeSessionId={null} onReady={value => (controls = value)} requestGateway={requestGateway} />)
 
     await expect(
       controls.selectModel({
@@ -175,7 +171,6 @@ describe('useModelControls', () => {
     // the gateway or the profile default here.
     expect($currentModel.get()).toBe('claude-sonnet-4.6')
     expect($currentProvider.get()).toBe('anthropic')
-    expect(getCurrentModelSource()).toBe('manual')
     expect(requestGateway).not.toHaveBeenCalled()
     expect(setGlobalModel).not.toHaveBeenCalled()
   })
@@ -185,6 +180,7 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
+        activeSessionId: null,
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -197,7 +193,6 @@ describe('useModelControls', () => {
     // A user pick must survive the lifecycle refreshes that fire on boot / fresh
     // draft / session events.
     setCurrentModel('anthropic/claude-sonnet-4.6')
-    setCurrentModelSource('manual')
     setCurrentProvider('anthropic')
     await result.current.refreshCurrentModel()
     expect($currentModel.get()).toBe('anthropic/claude-sonnet-4.6')
@@ -205,28 +200,5 @@ describe('useModelControls', () => {
     // A profile swap forces a reseed to the new profile's default.
     await result.current.refreshCurrentModel(true)
     expect($currentModel.get()).toBe('openai/gpt-5.5')
-  })
-
-  it('refreshes legacy/default-derived composer state from the profile default', async () => {
-    setCurrentModel('openai/gpt-5.5')
-    setCurrentProvider('nous')
-    setCurrentModelSource('')
-    vi.mocked(getGlobalModelInfo).mockResolvedValue({ model: 'gpt-5.5', provider: 'openai-codex' })
-
-    const { result } = renderHook(() =>
-      useModelControls({
-        queryClient: new QueryClient(),
-        requestGateway: vi.fn()
-      })
-    )
-
-    expect(getCurrentModelSource()).toBe('')
-
-    await result.current.refreshCurrentModel()
-
-    expect(getGlobalModelInfo).toHaveBeenCalled()
-    expect($currentModel.get()).toBe('gpt-5.5')
-    expect($currentProvider.get()).toBe('openai-codex')
-    expect(getCurrentModelSource()).toBe('default')
   })
 })

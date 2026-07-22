@@ -770,14 +770,8 @@ class CLICommandsMixin:
         self._pending_title = None
         _sync_process_session_id(target_id)
 
-        # Load conversation history (strip transcript-only metadata entries).
-        # repair_alternation: this /resume feeds LIVE REPLAY — ``restored``
-        # becomes ``self.conversation_history`` for subsequent turns. Heal a
-        # durable ``user;user`` violation once here instead of re-firing the
-        # pre-request repair on every request for the rest of the session.
-        restored = self._session_db.get_messages_as_conversation(
-            target_id, repair_alternation=True
-        )
+        # Load conversation history (strip transcript-only metadata entries)
+        restored = self._session_db.get_messages_as_conversation(target_id)
         restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
         self.conversation_history = restored
 

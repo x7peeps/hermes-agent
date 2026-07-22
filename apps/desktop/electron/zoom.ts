@@ -49,9 +49,8 @@ export function applyZoomLevel(webContents, level) {
 }
 
 // Chromium on Windows can drop webContents zoom when a BrowserWindow is minimized
-// and restored or crosses onto a monitor with different display scaling. Re-apply
-// the persisted level after each completed lifecycle transition.
-export const ZOOM_REASSERT_WINDOW_EVENTS = ['show', 'restore', 'moved']
+// and restored. Re-apply the persisted level on these lifecycle transitions.
+export const ZOOM_REASSERT_WINDOW_EVENTS = ['show', 'restore']
 
 export function installZoomReassertOnWindowEvents(win, reassert) {
   if (!win?.on) {

@@ -57,7 +57,6 @@ import { Codicon } from '@/components/ui/codicon'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { attachmentDisplayText, attachmentId, pathLabel } from '@/lib/chat-runtime'
-import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { Loader2Icon } from '@/lib/icons'
@@ -189,7 +188,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
   const syncDraftFromEditor = useCallback(
     (editor: HTMLDivElement) => {
-      const nextDraft = sanitizeComposerInput(composerPlainText(editor))
+      const nextDraft = composerPlainText(editor)
 
       if (nextDraft !== draftRef.current) {
         draftRef.current = nextDraft
@@ -478,7 +477,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   }
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    const pastedText = sanitizeComposerInput(event.clipboardData.getData('text'))
+    const pastedText = event.clipboardData.getData('text')
 
     if (!pastedText || DATA_IMAGE_URL_RE.test(pastedText.trim())) {
       event.preventDefault()

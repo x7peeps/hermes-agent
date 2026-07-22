@@ -33,9 +33,7 @@ function normalizeEntries(value: unknown): FallbackEntry[] {
     if (typeof item === 'string') {
       const slash = item.indexOf('/')
 
-      return slash > 0
-        ? { provider: item.slice(0, slash), model: item.slice(slash + 1) }
-        : { provider: '', model: item }
+      return slash > 0 ? { provider: item.slice(0, slash), model: item.slice(slash + 1) } : { provider: '', model: item }
     }
 
     return { provider: '', model: '' }
@@ -47,10 +45,7 @@ function completeEntries(rows: FallbackEntry[]): FallbackEntry[] {
 }
 
 function entriesEqual(a: FallbackEntry[], b: FallbackEntry[]): boolean {
-  return (
-    a.length === b.length &&
-    a.every((entry, index) => entry.provider === b[index]?.provider && entry.model === b[index]?.model)
-  )
+  return a.length === b.length && a.every((entry, index) => entry.provider === b[index]?.provider && entry.model === b[index]?.model)
 }
 
 /**

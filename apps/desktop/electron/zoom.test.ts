@@ -64,7 +64,7 @@ test('extreme percentages clamp to the level bounds', () => {
   assert.equal(percentToZoomLevel(1_000_000), 9)
 })
 
-test('installZoomReassertOnWindowEvents wires show, restore, and cross-display moves', () => {
+test('installZoomReassertOnWindowEvents wires show and restore', () => {
   const handlers = new Map()
 
   const win = {
@@ -82,8 +82,7 @@ test('installZoomReassertOnWindowEvents wires show, restore, and cross-display m
   assert.deepEqual([...handlers.keys()], [...ZOOM_REASSERT_WINDOW_EVENTS])
   handlers.get('show')()
   handlers.get('restore')()
-  handlers.get('moved')()
-  assert.equal(calls, 3)
+  assert.equal(calls, 2)
 })
 
 test('installZoomReassertOnWindowEvents skips destroyed windows', () => {

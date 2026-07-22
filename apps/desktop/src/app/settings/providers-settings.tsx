@@ -6,8 +6,7 @@ import { runInTerminal } from '@/app/right-sidebar/store'
 import {
   FEATURED_ID,
   FeaturedProviderRow,
-  FireworksProviderRow,
-  OpenRouterProviderRow,
+  KeyProviderRow,
   ProviderRow,
   providerTitle,
   sortProviders
@@ -115,12 +114,11 @@ function buildProviderKeyGroups(vars: Record<string, EnvVarInfo>): ProviderKeyGr
 
 // Deliberately a near-1:1 replica of the first-run onboarding picker
 // (`Picker` in desktop-onboarding-overlay): same recommended card, same
-// Fireworks #2 quick-key row, same provider rows, same "Other providers"
-// disclosure, same OpenRouter quick-key row, and the same bottom-right
-// "I have an API key" affordance. The leaf cards are the exact shared
-// components, so the two surfaces stay visually identical. Selecting a
-// provider hands off to the shared onboarding overlay, which runs that
-// provider's real sign-in flow; the key affordances open the API-key
+// provider rows, same "Other providers" disclosure, same OpenRouter quick-key
+// row, and the same bottom-right "I have an API key" affordance. The leaf cards
+// are the exact shared components, so the two surfaces stay visually identical.
+// Selecting a provider hands off to the shared onboarding overlay, which runs
+// that provider's real sign-in flow; the key affordances open the API-key
 // catalog below.
 function OAuthPicker({
   disconnecting,
@@ -174,8 +172,6 @@ function OAuthPicker({
         {p.intro}
       </p>
       {featured && <FeaturedProviderRow onSelect={select} provider={featured} />}
-      {/* Slot #2 — always visible, matching onboarding / CANONICAL_PROVIDERS. */}
-      <FireworksProviderRow onClick={onWantApiKey} />
       {connected.length > 0 && (
         <>
           <GroupLabel>{p.connected}</GroupLabel>
@@ -197,7 +193,7 @@ function OAuthPicker({
           {others.map(p => (
             <ProviderRow key={p.id} onSelect={select} provider={p} />
           ))}
-          <OpenRouterProviderRow onClick={onWantApiKey} />
+          <KeyProviderRow onClick={onWantApiKey} />
         </>
       )}
       {collapsible && (
