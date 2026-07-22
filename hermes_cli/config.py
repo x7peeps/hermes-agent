@@ -8110,12 +8110,7 @@ def edit_config():
         return
     
     print(f"Opening {config_path} in {editor}...")
-    try:
-        subprocess.run([editor, str(config_path)], timeout=3600)
-    except subprocess.TimeoutExpired:
-        print(f"Editor timed out after 1 hour.")
-    except KeyboardInterrupt:
-        print("\nEditor interrupted.")
+    subprocess.run([editor, str(config_path)])
 
 
 def _default_value_for_key(dotted_key: str):
