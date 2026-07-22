@@ -83,7 +83,7 @@ def main():
             continue
 
         if msg.get("method") == "initialized":
-            if script in {"requests", "slow_requests"}:
+            if script in {"requests", "slow_requests", "multi_requests"}:
                 # Send a server-to-client request to exercise the client's
                 # fire-and-forget request handler task path.
                 write_message({
