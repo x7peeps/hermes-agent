@@ -1920,6 +1920,15 @@ if not _configured_cwd or _configured_cwd in CWD_PLACEHOLDERS:
     else:
         os.environ["TERMINAL_CWD"] = _resolved_cwd
 
+# 🔴 Capture the gateway's launch-time resolved cwd so that per-session
+# context isolation is immune to concurrent cron-job workdir overrides.
+# A cron job with ``workdir`` temporarily sets ``os.environ["TERMINAL_CWD"]``
+# (process-global) while it runs.  Without this snapshot, a gateway session
+# created during that window reads the cron job's workdir via
+# ``resolve_context_cwd()``, loading the wrong ``AGENTS.md`` into its system
+# prompt — see #69396.
+_GATEWAY_LAUNCH_CWD: str = os.environ.get("TERMINAL_CWD", "")
+
 from gateway.config import (
     ChannelOverride,
     Platform,
@@ -3181,6 +3190,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # handlers call this facade and await every operation.
         self._async_session_store = AsyncSessionStore(self.session_store)
         self.delivery_router = DeliveryRouter(self.config)
+        # Snapshot of the gateway's launch-time cwd, captured at module load.
+        # Used in _set_session_env to pin each session's _SESSION_CWD so that
+        # concurrent cron-job workdir overrides (which mutate the process-global
+        # os.environ["TERMINAL_CWD"]) never leak into interactive sessions —
+        # see #69396.
+        self._gateway_launch_cwd = _GATEWAY_LAUNCH_CWD
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -16692,6 +16707,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            cwd=getattr(self, "_gateway_launch_cwd", "") or "",
         )
 
     def _clear_session_env(self, tokens: list) -> None:
