@@ -742,6 +742,103 @@ class TestGitInstallShaRef:
 # ---------------------------------------------------------------------------
 
 
+class TestGitInstallTimeouts:
+    """subprocess.TimeoutExpired in _do_git_install is converted to CatalogError."""
+
+    def _make_entry(self, catalog_dir, ref="abc1234"):
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": ref,
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+        from hermes_cli.mcp_catalog import get_entry
+        return get_entry("demo")
+
+    def test_branch_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on the shallow branch clone must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        def _raise_timeout(*a, **kw):
+            raise sp.TimeoutExpired(cmd=a[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _raise_timeout)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir, ref="main")
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+
+    def test_full_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on the full clone (SHA ref path) must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        call_count = [0]
+
+        def _raise_timeout_on_clone(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # branch clone attempt fails (non-zero rc)
+                class _P:
+                    returncode = 1
+                return _P()
+            raise sp.TimeoutExpired(cmd=a[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _raise_timeout_on_clone)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir, ref="main")
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+
+    def test_checkout_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """Timeout on git checkout must raise CatalogError."""
+        import subprocess as sp
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError
+
+        class _FakeProc:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        call_count = [0]
+
+        def _fake_run(argv, *a, **kw):
+            call_count[0] += 1
+            if "checkout" in argv:
+                raise sp.TimeoutExpired(cmd=argv, timeout=60)
+            return _FakeProc(returncode=0)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _fake_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = self._make_entry(catalog_dir)  # SHA ref
+        assert entry is not None
+        with pytest.raises(CatalogError) as excinfo:
+            from hermes_cli.mcp_catalog import _do_git_install
+            _do_git_install(entry)
+        assert "timed out" in str(excinfo.value).lower()
+        assert "checkout" in str(excinfo.value).lower()
+
+
 class TestToolsConfigIncludeMode:
     def test_configure_mcp_writes_include_not_exclude(self, monkeypatch, tmp_path):
         """`_configure_mcp_tools_interactive` in tools_config.py must write
