@@ -862,6 +862,38 @@ class TestGitInstallTimeout:
         with pytest.raises(CatalogError, match="timed out"):
             _do_git_install(entry)
 
+    def test_sha_clone_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
+        """git clone (SHA ref) timeout is converted to CatalogError."""
+        from hermes_cli import mcp_catalog
+        from hermes_cli.mcp_catalog import CatalogError, _do_git_install, get_entry
+        import subprocess
+
+        body = _basic_manifest(
+            install={
+                "type": "git",
+                "url": "https://example.com/x.git",
+                "ref": "abc1234567890abcdef1234567890abcdef12345",
+                "bootstrap": [],
+            },
+            transport={
+                "type": "stdio",
+                "command": "${INSTALL_DIR}/run.sh",
+                "args": [],
+            },
+        )
+        _write_manifest(catalog_dir, "demo", body)
+
+        def _timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=300)
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", _timeout_run)
+        monkeypatch.setattr(mcp_catalog.shutil, "which", lambda x: "/usr/bin/git")
+
+        entry = get_entry("demo")
+        assert entry is not None
+        with pytest.raises(CatalogError, match="git clone timed out"):
+            _do_git_install(entry)
+
     def test_checkout_timeout_raises_catalog_error(self, catalog_dir, monkeypatch):
         """git checkout timeout is converted to CatalogError."""
         from hermes_cli import mcp_catalog
