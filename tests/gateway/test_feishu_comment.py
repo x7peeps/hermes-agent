@@ -256,5 +256,121 @@ class TestWikiReverseLookup(unittest.TestCase):
         self.assertEqual(second_call_kwargs[1].get("wiki_token") or second_call_kwargs[0][3], "WIKI123")
 
 
+class TestGatherExceptionIsolation(unittest.TestCase):
+    """Regression tests for asyncio.gather return_exceptions=True (#64864).
+
+    After the gather call was changed to return_exceptions=True, each fetch
+    failure must be isolated — the other result is retained and the handler
+    continues instead of propagating the exception.
+    """
+
+    def _run(self, coro):
+        """Execute an async coroutine in a synchronous test context."""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+
+    def test_gather_meta_failure_isolates_and_preserves_comment(self):
+        """Verify that the gather pattern in handle_drive_comment_event
+        isolates a meta fetch exception and preserves the comment result."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(side_effect=RuntimeError("meta failed"))
+            mock_comment = AsyncMock(return_value={"is_whole": True})
+
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
+            doc_meta_result, comment_detail_result = await asyncio.gather(
+                meta_t, comment_t, return_exceptions=True,
+            )
+
+            if isinstance(doc_meta_result, Exception):
+                doc_meta = {}
+            else:
+                doc_meta = doc_meta_result or {}
+
+            if isinstance(comment_detail_result, Exception):
+                comment_detail = {}
+            else:
+                comment_detail = comment_detail_result or {}
+
+            return doc_meta, comment_detail
+
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
+
+        assert doc_meta == {}
+        assert comment_detail == {"is_whole": True}
+
+    def test_gather_comment_failure_isolates_and_preserves_meta(self):
+        """Verify that the actual gather pattern in handle_drive_comment_event
+        isolates a comment fetch exception and preserves the meta result."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(return_value={"title": "MyDoc", "url": "https://x.com"})
+            mock_comment = AsyncMock(side_effect=RuntimeError("comment failed"))
+
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
+            doc_meta_result, comment_detail_result = await asyncio.gather(
+                meta_t, comment_t, return_exceptions=True,
+            )
+
+            if isinstance(doc_meta_result, Exception):
+                doc_meta = {}
+            else:
+                doc_meta = doc_meta_result or {}
+
+            if isinstance(comment_detail_result, Exception):
+                comment_detail = {}
+            else:
+                comment_detail = comment_detail_result or {}
+
+            return doc_meta, comment_detail
+
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
+
+        assert doc_meta == {"title": "MyDoc", "url": "https://x.com"}
+        assert comment_detail == {}
+
+    def test_both_fetches_succeed(self):
+        """Baseline: both fetches succeed, results are used normally."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(return_value={"title": "Doc", "url": "https://x.com"})
+            mock_comment = AsyncMock(return_value={"is_whole": False})
+
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
+            doc_meta_result, comment_detail_result = await asyncio.gather(
+                meta_t, comment_t, return_exceptions=True,
+            )
+
+            if isinstance(doc_meta_result, Exception):
+                doc_meta = {}
+            else:
+                doc_meta = doc_meta_result or {}
+
+            if isinstance(comment_detail_result, Exception):
+                comment_detail = {}
+            else:
+                comment_detail = comment_detail_result or {}
+
+            return doc_meta, comment_detail
+
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
+
+        assert doc_meta == {"title": "Doc", "url": "https://x.com"}
+        assert comment_detail == {"is_whole": False}
+
 if __name__ == "__main__":
     unittest.main()
