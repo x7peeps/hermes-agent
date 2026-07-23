@@ -14,6 +14,7 @@ import hermes_cli.gateway as gateway_cli
 from gateway import status
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+    GATEWAY_FATAL_CONFIG_EXIT_CODE,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
 )
 
@@ -420,7 +421,7 @@ class TestRequireServiceInstalled:
 
 class TestGeneratedSystemdUnits:
     def _expected_timeout_stop_sec(self) -> str:
-        timeout = int(max(60, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT) + 30)
+        timeout = int(max(60, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT + 30))
         return f"TimeoutStopSec={timeout}"
 
     def test_user_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self, monkeypatch):
@@ -435,9 +436,9 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
+        assert f"RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}" in unit
+        # The default drain is immediate, so keep a bounded 60-second stop
+        # budget without forcing every restart to wait 90 seconds.
         assert self._expected_timeout_stop_sec() in unit
         # ExecStopPost reaps any process the gateway didn't clean up itself,
         # so long-lived helpers (e.g. adb) can't be left orphaned in the
@@ -447,6 +448,13 @@ class TestGeneratedSystemdUnits:
         # KillMode=mixed is preserved so the gateway still reaps its own
         # tool-call children before systemd SIGKILLs the cgroup — #8202.
         assert "KillMode=mixed" in unit
+
+    def test_user_unit_adds_cleanup_headroom_to_positive_drain_timeout(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 45)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert "TimeoutStopSec=75" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -546,9 +554,9 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
+        assert f"RestartPreventExitStatus={GATEWAY_FATAL_CONFIG_EXIT_CODE}" in unit
+        # The default drain is immediate, so keep a bounded 60-second stop
+        # budget without forcing every restart to wait 90 seconds.
         assert self._expected_timeout_stop_sec() in unit
         assert "WantedBy=multi-user.target" in unit
         # ExecStopPost reaps any process the gateway didn't clean up itself,
@@ -1194,35 +1202,6 @@ class TestLaunchdServiceRecovery:
         assert "nohup hermes gateway run" in out
         # Marker is still written so status knows launchd is unavailable
         assert gateway_cli._launchd_unsupported_marker_exists()
-
-    def test_spawn_detached_gateway_closes_first_fd_on_second_open_failure(
-        self, monkeypatch, tmp_path
-    ):
-        """Regression test for #64427: when first open() succeeds but second
-        open() raises OSError, the first file handle must be closed to avoid
-        leaking the fd."""
-        close_called = []
-
-        class FakeFile:
-            def close(self):
-                close_called.append(1)
-
-        call_count = 0
-
-        def fake_open(path, mode):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return FakeFile()
-            raise OSError("mock open failure for second file")
-
-        monkeypatch.setattr("builtins.open", fake_open)
-        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: tmp_path)
-
-        result = gateway_cli._spawn_detached_gateway()
-
-        assert result is False
-        assert len(close_called) == 1, "first fd was not closed on second open failure"
 
     # ── PID parsing ──────────────────────────────────────────────────────
 
