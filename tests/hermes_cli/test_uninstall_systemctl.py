@@ -124,3 +124,28 @@ class TestUninstallGatewaySystemctlTimeout:
             assert c["kwargs"].get("stdin") is subprocess.DEVNULL, (
                 f"systemd call {c['args']} missing stdin=subprocess.DEVNULL"
             )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="systemd is Linux-only")
+    def test_timeout_expired_does_not_crash_uninstall(self, monkeypatch):
+        """A subprocess.TimeoutExpired from any systemctl call is caught and
+        the uninstall flow continues without crashing."""
+        call_count = [0]
+
+        def _timeout_on_stop(cmd, **kwargs):
+            call_count[0] += 1
+            if "stop" in cmd:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+            ns = type("Completed", (), {"returncode": 0, "stdout": b"", "stderr": b""})
+            return ns
+
+        monkeypatch.setattr("subprocess.run", _timeout_on_stop, raising=True)
+        _stub_gateway_imports(monkeypatch)
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda: [])
+
+        from hermes_cli.uninstall import uninstall_gateway_service
+        # Should not raise — the existing except Exception in the real code
+        # catches TimeoutExpired and logs the warning.
+        uninstall_gateway_service()
+        # At least the stop call was attempted.
+        assert call_count[0] >= 1
