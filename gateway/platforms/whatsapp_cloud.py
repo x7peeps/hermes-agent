@@ -1253,19 +1253,7 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            except asyncio.TimeoutError:
-                # Bound wait completed but the child is still running —
-                # terminate it and reap the output before falling through
-                # to the fallback path.
-                proc.kill()
-                try:
-                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-                except asyncio.TimeoutError:
-                    pass  # give up on reaping; OS will clean up
-                logger.error("[whatsapp_cloud] ffmpeg opus conversion timed out")
-                return None
+            _, stderr = await proc.communicate()
             if proc.returncode != 0 or not Path(out_path).exists():
                 logger.error(
                     "[whatsapp_cloud] ffmpeg opus conversion failed "
