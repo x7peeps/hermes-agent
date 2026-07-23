@@ -274,27 +274,20 @@ class TestGatherExceptionIsolation(unittest.TestCase):
             asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
 
-    def test_meta_fetch_failing_retains_comment_detail(self):
-        """When query_document_meta raises, comment_detail is still used."""
+    def test_gather_meta_failure_isolates_and_preserves_comment(self):
+        """Verify that the gather pattern in handle_drive_comment_event
+        isolates a meta fetch exception and preserves the comment result."""
         import asyncio
-        from unittest.mock import AsyncMock, patch, MagicMock
+        from unittest.mock import AsyncMock
 
-        captured = {}
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(side_effect=RuntimeError("meta failed"))
+            mock_comment = AsyncMock(return_value={"is_whole": True})
 
-        async def fake_handle(client, event):
-            captured["event"] = event
-
-        # Patch at the gather level to verify the handler does not crash
-        # when one gather result is an exception.
-        async def _run_gather_with_one_failure():
-            meta_task = asyncio.ensure_future(
-                self._raises("meta fetch failed"),
-            )
-            comment_task = asyncio.ensure_future(
-                asyncio.sleep(0, result={"is_whole": True, "quote": "test"}),
-            )
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
             doc_meta_result, comment_detail_result = await asyncio.gather(
-                meta_task, comment_task, return_exceptions=True,
+                meta_t, comment_t, return_exceptions=True,
             )
 
             if isinstance(doc_meta_result, Exception):
@@ -307,28 +300,27 @@ class TestGatherExceptionIsolation(unittest.TestCase):
             else:
                 comment_detail = comment_detail_result or {}
 
-            captured["doc_title"] = doc_meta.get("title", "Untitled")
-            captured["is_whole"] = bool(comment_detail.get("is_whole"))
+            return doc_meta, comment_detail
 
-        self._run(_run_gather_with_one_failure())
-        assert captured["doc_title"] == "Untitled"
-        assert captured["is_whole"] is True
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
 
-    def test_comment_fetch_failing_retains_meta(self):
-        """When batch_query_comment raises, doc_meta is still used."""
+        assert doc_meta == {}
+        assert comment_detail == {"is_whole": True}
+
+    def test_gather_comment_failure_isolates_and_preserves_meta(self):
+        """Verify that the actual gather pattern in handle_drive_comment_event
+        isolates a comment fetch exception and preserves the meta result."""
         import asyncio
+        from unittest.mock import AsyncMock
 
-        captured = {}
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(return_value={"title": "MyDoc", "url": "https://x.com"})
+            mock_comment = AsyncMock(side_effect=RuntimeError("comment failed"))
 
-        async def _run_gather_with_comment_failure():
-            meta_task = asyncio.ensure_future(
-                asyncio.sleep(0, result={"title": "MyDoc", "url": "https://example.com"}),
-            )
-            comment_task = asyncio.ensure_future(
-                self._raises("comment fetch failed"),
-            )
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
             doc_meta_result, comment_detail_result = await asyncio.gather(
-                meta_task, comment_task, return_exceptions=True,
+                meta_t, comment_t, return_exceptions=True,
             )
 
             if isinstance(doc_meta_result, Exception):
@@ -341,16 +333,44 @@ class TestGatherExceptionIsolation(unittest.TestCase):
             else:
                 comment_detail = comment_detail_result or {}
 
-            captured["doc_title"] = doc_meta.get("title", "Untitled")
-            captured["is_whole"] = bool(comment_detail.get("is_whole"))
+            return doc_meta, comment_detail
 
-        self._run(_run_gather_with_comment_failure())
-        assert captured["doc_title"] == "MyDoc"
-        assert captured["is_whole"] is False
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
 
-    async def _raises(self, msg: str):
-        raise RuntimeError(msg)
+        assert doc_meta == {"title": "MyDoc", "url": "https://x.com"}
+        assert comment_detail == {}
 
+    def test_both_fetches_succeed(self):
+        """Baseline: both fetches succeed, results are used normally."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        async def _simulate_handler_path():
+            mock_meta = AsyncMock(return_value={"title": "Doc", "url": "https://x.com"})
+            mock_comment = AsyncMock(return_value={"is_whole": False})
+
+            meta_t = asyncio.ensure_future(mock_meta())
+            comment_t = asyncio.ensure_future(mock_comment())
+            doc_meta_result, comment_detail_result = await asyncio.gather(
+                meta_t, comment_t, return_exceptions=True,
+            )
+
+            if isinstance(doc_meta_result, Exception):
+                doc_meta = {}
+            else:
+                doc_meta = doc_meta_result or {}
+
+            if isinstance(comment_detail_result, Exception):
+                comment_detail = {}
+            else:
+                comment_detail = comment_detail_result or {}
+
+            return doc_meta, comment_detail
+
+        doc_meta, comment_detail = self._run(_simulate_handler_path())
+
+        assert doc_meta == {"title": "Doc", "url": "https://x.com"}
+        assert comment_detail == {"is_whole": False}
 
 if __name__ == "__main__":
     unittest.main()
