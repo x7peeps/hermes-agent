@@ -457,6 +457,31 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+def _has_configured_cdp_endpoint() -> bool:
+    """Return True when a CDP endpoint is *configured*, without any network I/O.
+
+    This is a pure configuration check: it only looks at ``BROWSER_CDP_URL``
+    and ``browser.cdp_url`` in config.yaml.  No HTTP/WebSocket requests are
+    made.
+
+    Intended for use in ``check_fn`` during tool-schema assembly, where a
+    temporarily offline Chrome endpoint must NOT cause the tool to disappear
+    from the schema.  See #70811.
+    """
+    if os.environ.get("BROWSER_CDP_URL", "").strip():
+        return True
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+        browser_cfg = cfg.get("browser", {})
+        if isinstance(browser_cfg, dict):
+            return bool(str(browser_cfg.get("cdp_url", "") or "").strip())
+    except Exception as e:
+        logger.debug("Could not read browser.cdp_url from config: %s", e)
+    return False
+
+
 def _get_cdp_override() -> str:
     """Return a normalized CDP URL override, or empty string.
 

@@ -556,33 +556,47 @@ def test_private_guard_inactive_does_not_probe(monkeypatch, cdp_server):
 
 
 def test_check_fn_false_when_no_cdp_url(monkeypatch):
-    """Gate closes when no CDP URL is set — even if the browser toolset is
+    """Gate closes when no CDP URL is configured — even if the browser toolset is
     otherwise configured."""
     import tools.browser_tool as bt
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
-    monkeypatch.setattr(bt, "_get_cdp_override", lambda: "")
+    monkeypatch.setattr(bt, "_has_configured_cdp_endpoint", lambda: False)
     assert browser_cdp_tool._browser_cdp_check() is False
 
 
-def test_check_fn_true_when_cdp_url_set(monkeypatch):
-    """Gate opens as soon as a CDP URL is resolvable."""
+def test_check_fn_true_when_cdp_url_configured(monkeypatch):
+    """Gate opens as soon as a CDP URL is configured (regardless of reachability)."""
     import tools.browser_tool as bt
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
-    monkeypatch.setattr(
-        bt, "_get_cdp_override", lambda: "ws://localhost:9222/devtools/browser/x"
-    )
+    monkeypatch.setattr(bt, "_has_configured_cdp_endpoint", lambda: True)
     assert browser_cdp_tool._browser_cdp_check() is True
 
 
 def test_check_fn_false_when_browser_requirements_fail(monkeypatch):
-    """Even with a CDP URL, gate closes if the overall browser toolset is
+    """Even with a configured CDP URL, gate closes if the overall browser toolset is
     unavailable (e.g. agent-browser not installed)."""
     import tools.browser_tool as bt
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: False)
-    monkeypatch.setattr(
-        bt, "_get_cdp_override", lambda: "ws://localhost:9222/devtools/browser/x"
-    )
+    monkeypatch.setattr(bt, "_has_configured_cdp_endpoint", lambda: True)
     assert browser_cdp_tool._browser_cdp_check() is False
+
+
+def test_check_fn_no_network_io(monkeypatch):
+    """Regression test for #70811: check_fn must NOT perform any network I/O.
+
+    A configured but temporarily dead CDP endpoint must stay schema-eligible
+    without making HTTP/WebSocket requests.
+    """
+    import tools.browser_tool as bt
+
+    def _exploding_resolve(*_a, **_kw):
+        raise AssertionError("_resolve_cdp_override must not be called during check_fn")
+
+    monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
+    monkeypatch.setattr(bt, "_resolve_cdp_override", _exploding_resolve)
+    monkeypatch.setenv("BROWSER_CDP_URL", "http://dead-host:9222")
+    # _has_configured_cdp_endpoint reads the env var directly (no _resolve call)
+    assert browser_cdp_tool._browser_cdp_check() is True
