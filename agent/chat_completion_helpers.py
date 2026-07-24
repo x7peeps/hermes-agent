@@ -1534,6 +1534,76 @@ def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str
 
 
 
+def _resolve_fallback_api_mode(
+    agent,
+    fb_entry: Dict[str, Any],
+    fb_provider: str,
+    fb_model: str,
+) -> str:
+    """Determine the correct api_mode for a fallback entry.
+
+    Priority:
+    1. Explicit ``api_mode`` on the fallback entry itself (e.g. user wrote
+       ``api_mode: anthropic_messages`` in the fallback_providers block).
+    2. ``api_mode`` declared on the named ``custom_providers`` / ``providers``
+       entry that the fallback references.
+    3. Heuristic inference from provider name / base URL (mirrors the primary
+       path's ``determine_api_mode()``).
+
+    This fixes the gap where a ``custom_providers`` entry with
+    ``api_mode: anthropic_messages`` is referenced from ``fallback_providers``
+    by name — the primary path routes to ``/v1/messages`` correctly, but the
+    fallback path defaulted to ``chat_completions`` (``/chat/completions``)
+    because the hardcoded heuristic block didn't recognize the custom
+    provider name. (#70961)
+    """
+    from utils import base_url_host_matches, base_url_hostname
+
+    # Priority 1: api_mode on the fallback entry itself
+    entry_api_mode = str(fb_entry.get("api_mode") or "").strip().lower()
+    if entry_api_mode in ("anthropic_messages", "codex_responses", "bedrock_converse"):
+        return entry_api_mode
+
+    # Priority 2: look up the named custom_providers / providers entry
+    try:
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+        custom_entry = _get_named_custom_provider(fb_provider)
+        if custom_entry:
+            custom_api_mode = str(custom_entry.get("api_mode") or "").strip().lower()
+            if custom_api_mode in ("anthropic_messages", "codex_responses", "bedrock_converse"):
+                return custom_api_mode
+    except Exception:
+        pass
+
+    # Priority 3: heuristic inference from provider name / base URL / model
+    # (same logic the primary path uses, mirrored here for completeness).
+    fb_base_url_hint = str(fb_entry.get("base_url") or "").strip()
+    if fb_provider == "openai-codex":
+        return "codex_responses"
+    # Check anthropic before URL heuristics (matches primary path order).
+    if fb_provider == "anthropic":
+        return "anthropic_messages"
+    if fb_base_url_hint:
+        normalized = fb_base_url_hint.rstrip("/").lower()
+        if normalized.endswith("/anthropic") or base_url_hostname(fb_base_url_hint) == "api.anthropic.com":
+            return "anthropic_messages"
+    if agent._is_azure_openai_url(fb_base_url_hint or ""):
+        return "chat_completions"
+    if agent._is_direct_openai_url(fb_base_url_hint or ""):
+        return "codex_responses"
+    if agent._provider_model_requires_responses_api(fb_model, provider=fb_provider):
+        return "codex_responses"
+    if fb_provider == "bedrock" or (
+        fb_base_url_hint
+        and base_url_hostname(fb_base_url_hint).startswith("bedrock-runtime.")
+        and base_url_host_matches(fb_base_url_hint, "amazonaws.com")
+    ):
+        return "bedrock_converse"
+
+    return "chat_completions"
+
+
+
 def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
     """Switch to the next fallback model/provider in the chain.
 
@@ -1645,10 +1715,24 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # (not substring) — see GHSA-76xc-57q6-vm5m.
         if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
             fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+        # Determine api_mode from the custom provider entry (if any), then
+        # refine with provider/base-url/model heuristics.  The custom
+        # provider's declared api_mode (e.g. anthropic_messages) must take
+        # precedence over URL-based guesses — otherwise a custom provider
+        # with api_mode: anthropic_messages routes to /chat/completions
+        # on fallback, causing 404s. (#70961)
+        fb_api_mode = _resolve_fallback_api_mode(agent, fb, fb_provider, fb_model)
+
+        # Pass the resolved api_mode to the client router so it constructs
+        # the correct client type (Anthropic vs OpenAI).  Without this,
+        # resolve_provider_client falls through to OpenAI-wire for unknown
+        # custom provider names, returning an OpenAI client whose base_url
+        # the code below then uses for further api_mode guessing.
         fb_client, _resolved_fb_model = resolve_provider_client(
             fb_provider, model=fb_model, raw_codex=True,
             explicit_base_url=fb_base_url_hint,
-            explicit_api_key=fb_api_key_hint)
+            explicit_api_key=fb_api_key_hint,
+            api_mode=fb_api_mode)
         if fb_client is None:
             logger.warning(
                 "Fallback to %s failed: provider not configured",
@@ -1665,43 +1749,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 fb_model, fb_provider, _norm_err,
             )
 
-        # Determine api_mode from provider / base URL / model
-        fb_api_mode = "chat_completions"
         fb_base_url = str(fb_client.base_url)
-        _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
-        if fb_provider == "openai-codex":
-            fb_api_mode = "codex_responses"
-        elif (
-            fb_provider == "anthropic"
-            or fb_base_url.rstrip("/").lower().endswith("/anthropic")
-            or base_url_hostname(fb_base_url) == "api.anthropic.com"
-        ):
-            # Custom providers (e.g. cron-anthropic) point at the native
-            # api.anthropic.com host with no "/anthropic" path suffix, so the
-            # name/suffix checks above miss them and they default to
-            # chat_completions → POST /v1/chat/completions → 404. Match the
-            # host the same way determine_api_mode() and _detect_api_mode_for_url()
-            # do on the primary path. (#32243, #49247)
-            fb_api_mode = "anthropic_messages"
-        elif _fb_is_azure:
-            # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
-            # support the Responses API. Stay on chat_completions.
-            fb_api_mode = "chat_completions"
-        elif agent._is_direct_openai_url(fb_base_url):
-            fb_api_mode = "codex_responses"
-        elif agent._provider_model_requires_responses_api(
-            fb_model,
-            provider=fb_provider,
-        ):
-            # GPT-5.x models usually need Responses API, but keep
-            # provider-specific exceptions like Copilot gpt-5-mini on
-            # chat completions.
-            fb_api_mode = "codex_responses"
-        elif fb_provider == "bedrock" or (
-            base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
-            and base_url_host_matches(fb_base_url, "amazonaws.com")
-        ):
-            fb_api_mode = "bedrock_converse"
 
         old_model = agent.model
         old_provider = agent.provider

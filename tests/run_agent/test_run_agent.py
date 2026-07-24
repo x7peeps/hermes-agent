@@ -8645,3 +8645,80 @@ class TestMemoryProviderTurnStart:
         # The extracted body uses ``agent.X`` rather than ``self.X``;
         # assert the extracted-form spelling directly.
         assert "on_turn_start(agent._user_turn_count" in src
+
+
+class TestFallbackCustomProviderApiMode:
+    """Bug fix: fallback_providers referencing a custom_providers entry with
+    api_mode: anthropic_messages routed to /chat/completions instead of
+    /v1/messages. (#70961)
+
+    _resolve_fallback_api_mode must look up the named custom provider entry
+    and honour its declared api_mode.
+    """
+
+    def test_custom_provider_anthropic_messages_via_fallback(self, agent, monkeypatch, tmp_path):
+        """When a fallback entry references a named custom provider whose
+        custom_providers entry declares api_mode=anthropic_messages, the
+        fallback must set agent.api_mode to anthropic_messages."""
+        from agent.chat_completion_helpers import _resolve_fallback_api_mode
+
+        # Stub the config so _get_named_custom_provider finds our entry.
+        # _get_named_custom_provider calls load_config() from runtime_provider,
+        # so we need to patch it at that import site.
+        import hermes_cli.runtime_provider as _rp_mod
+        monkeypatch.setattr(
+            _rp_mod,
+            "load_config",
+            lambda *a, **kw: {
+                "custom_providers": [
+                    {
+                        "name": "requesty",
+                        "base_url": "https://router.eu.requesty.ai",
+                        "api_key_env": "REQUESTY_API_KEY",
+                        "api_mode": "anthropic_messages",
+                    }
+                ]
+            },
+        )
+
+        fb_entry = {"provider": "requesty", "model": "bedrock/claude-sonnet-4-6@eu-central-1"}
+        result = _resolve_fallback_api_mode(agent, fb_entry, "requesty", "bedrock/claude-sonnet-4-6@eu-central-1")
+        assert result == "anthropic_messages", (
+            f"Expected api_mode='anthropic_messages' but got '{result}'; "
+            "custom provider entry api_mode was not propagated to fallback"
+        )
+
+    def test_fallback_entry_explicit_api_mode_wins(self, agent):
+        """If the fallback entry itself declares api_mode, it takes priority."""
+        from agent.chat_completion_helpers import _resolve_fallback_api_mode
+
+        fb_entry = {
+            "provider": "my-custom",
+            "model": "some-model",
+            "api_mode": "codex_responses",
+        }
+        result = _resolve_fallback_api_mode(agent, fb_entry, "my-custom", "some-model")
+        assert result == "codex_responses"
+
+    def test_fallback_bedrock_via_heuristic(self, agent):
+        """Bedrock fallback entry with bedrock base URL should resolve to
+        bedrock_converse via the heuristic branch."""
+        from agent.chat_completion_helpers import _resolve_fallback_api_mode
+
+        fb_entry = {
+            "provider": "bedrock",
+            "model": "anthropic.claude-sonnet-4-6-v1:0",
+            "base_url": "https://bedrock-runtime.eu-central-1.amazonaws.com",
+        }
+        result = _resolve_fallback_api_mode(agent, fb_entry, "bedrock", "anthropic.claude-sonnet-4-6-v1:0")
+        assert result == "bedrock_converse"
+
+    def test_fallback_default_chat_completions(self, agent, monkeypatch):
+        """Unknown custom provider with no api_mode defaults to
+        chat_completions."""
+        from agent.chat_completion_helpers import _resolve_fallback_api_mode
+
+        # No custom_providers entry, no api_mode on the entry itself.
+        fb_entry = {"provider": "unknown-provider", "model": "some-model"}
+        result = _resolve_fallback_api_mode(agent, fb_entry, "unknown-provider", "some-model")
+        assert result == "chat_completions"
