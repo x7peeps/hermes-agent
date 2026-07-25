@@ -13410,13 +13410,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                         # the pre-compression ones.
                                         _new_count = _msg_count
                                         _new_tokens = _approx_tokens
+                                        if _hyg_session_db is None:
+                                            _hyg_warn_reason = (
+                                                "no session_db on the hygiene agent"
+                                            )
+                                        else:
+                                            _hyg_warn_reason = (
+                                                "session_db present but in-place "
+                                                "compaction failed (see agent.log for "
+                                                "archive_and_compact error)"
+                                            )
                                         logger.warning(
                                             "Gateway hygiene compression for session %s "
                                             "did not rotate or compact in place "
-                                            "(no session_db on the hygiene agent) — "
+                                            "(%s) — "
                                             "preserving the original transcript instead "
                                             "of overwriting it with the summary (#21301).",
                                             session_entry.session_id,
+                                            _hyg_warn_reason,
                                         )
 
                                     logger.info(
