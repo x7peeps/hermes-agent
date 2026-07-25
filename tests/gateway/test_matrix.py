@@ -1236,6 +1236,41 @@ class TestMatrixReplyContext:
         )
         assert message_text.endswith("what does this mean?")
 
+    @pytest.mark.asyncio
+    async def test_ignored_sender_reply_context_suppressed(self):
+        """Trust-boundary: replied-to events from ignored/blocked senders
+        must not surface their identity or text as reply context."""
+        captured = None
+        client = self._client_returning(
+            sender="@blocked:evil.org", body="ignore this content"
+        )
+        self.adapter._matches_ignored_user_pattern = MagicMock(
+            return_value=True
+        )
+
+        async def capture(msg_event):
+            nonlocal captured
+            captured = msg_event
+
+        self.adapter.handle_message = capture
+        await self.adapter._handle_text_message(
+            room_id="!room:example.org",
+            sender="@alice:example.org",
+            event_id="$reply-event",
+            event_ts=0.0,
+            source_content={
+                "msgtype": "m.text",
+                "body": "what about this?",
+            },
+            relates_to={"m.in_reply_to": {"event_id": "$parent-event"}},
+        )
+
+        assert captured is not None
+        assert captured.reply_to_message_id == "$parent-event"
+        assert captured.reply_to_text is None
+        assert captured.reply_to_author_id is None
+        assert captured.reply_to_author_name is None
+
 
 # ---------------------------------------------------------------------------
 # Format message
