@@ -3381,6 +3381,141 @@ class SessionDB:
                         )
                 except sqlite3.OperationalError as exc:
                     logger.debug("v22 session_model_usage rebuild skipped: %s", exc)
+
+            # Post-migration repair: if session_model_usage still has the old
+            # 3- or 5-column primary key (v22 migration failed on a previous
+            # startup and current_version was still < 22 at that time, or the
+            # table existed before v22 and was never rebuilt), rebuild it now.
+            # This is NOT best-effort — a wrong PK silently breaks all token
+            # accounting (issue #71578) because the ON CONFLICT clause in
+            # _record_model_usage raises and rolls back the entire write
+            # transaction including the sessions UPDATE.
+            try:
+                _smu_pk_cols = cursor.execute(
+                    "SELECT name FROM pragma_table_info('session_model_usage') "
+                    "WHERE pk > 0 ORDER BY pk"
+                ).fetchall()
+                _smu_pk_names = tuple(r[0] for r in _smu_pk_cols)
+                _expected_pk = (
+                    "session_id", "model", "billing_provider",
+                    "billing_base_url", "billing_mode", "task",
+                )
+                if _smu_pk_names != _expected_pk:
+                    logger.info(
+                        "session_model_usage has wrong primary key %s (expected %s) "
+                        "— rebuilding to fix token accounting (issue #71578)",
+                        _smu_pk_names, _expected_pk,
+                    )
+                    cursor.execute(
+                        "ALTER TABLE session_model_usage RENAME TO session_model_usage_broken"
+                    )
+                    cursor.execute(
+                        """CREATE TABLE session_model_usage (
+                               session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                               model TEXT NOT NULL,
+                               billing_provider TEXT NOT NULL DEFAULT '',
+                               billing_base_url TEXT NOT NULL DEFAULT '',
+                               billing_mode TEXT NOT NULL DEFAULT '',
+                               task TEXT NOT NULL DEFAULT '',
+                               api_call_count INTEGER NOT NULL DEFAULT 0,
+                               input_tokens INTEGER NOT NULL DEFAULT 0,
+                               output_tokens INTEGER NOT NULL DEFAULT 0,
+                               cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                               cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                               reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                               estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                               actual_cost_usd REAL NOT NULL DEFAULT 0,
+                               cost_status TEXT,
+                               cost_source TEXT,
+                               first_seen REAL,
+                               last_seen REAL,
+                               PRIMARY KEY (session_id, model, billing_provider,
+                                           billing_base_url, billing_mode, task)
+                           )"""
+                    )
+                    # Copy old rows, mapping task='' for any legacy rows.
+                    # The old table may have fewer columns, so use PRAGMA to
+                    # discover what's there and SELECT only the common ones.
+                    _old_cols = [
+                        r[1] for r in cursor.execute(
+                            "PRAGMA table_info(session_model_usage_broken)"
+                        ).fetchall()
+                    ]
+                    _new_cols = [
+                        "session_id", "model", "billing_provider",
+                        "billing_base_url", "billing_mode", "task",
+                        "api_call_count", "input_tokens", "output_tokens",
+                        "cache_read_tokens", "cache_write_tokens",
+                        "reasoning_tokens", "estimated_cost_usd",
+                        "actual_cost_usd", "cost_status", "cost_source",
+                        "first_seen", "last_seen",
+                    ]
+                    _col_map = {
+                        "session_id": "session_id",
+                        "model": "model",
+                        "billing_provider": "COALESCE(billing_provider, '')",
+                        "billing_base_url": "COALESCE(billing_base_url, '')",
+                        "billing_mode": "COALESCE(billing_mode, '')",
+                        "task": "''",
+                        "api_call_count": "COALESCE(api_call_count, 0)",
+                        "input_tokens": "COALESCE(input_tokens, 0)",
+                        "output_tokens": "COALESCE(output_tokens, 0)",
+                        "cache_read_tokens": "COALESCE(cache_read_tokens, 0)",
+                        "cache_write_tokens": "COALESCE(cache_write_tokens, 0)",
+                        "reasoning_tokens": "COALESCE(reasoning_tokens, 0)",
+                        "estimated_cost_usd": "COALESCE(estimated_cost_usd, 0)",
+                        "actual_cost_usd": "COALESCE(actual_cost_usd, 0)",
+                        "cost_status": "cost_status",
+                        "cost_source": "cost_source",
+                        "first_seen": "first_seen",
+                        "last_seen": "last_seen",
+                    }
+                    _sel = ", ".join(
+                        _col_map[c] if c in _old_cols else "''"
+                        for c in _new_cols
+                    )
+                    # For integer/real columns that exist in the old table, use
+                    # COALESCE to fill NULLs. For missing columns, use '' which
+                    # SQLite coerces to 0 for INTEGER and 0.0 for REAL.
+                    _sel_parts = []
+                    for c in _new_cols:
+                        if c in _old_cols:
+                            _sel_parts.append(_col_map[c])
+                        else:
+                            # Missing column: provide a type-safe default.
+                            if c in (
+                                "api_call_count", "input_tokens", "output_tokens",
+                                "cache_read_tokens", "cache_write_tokens",
+                                "reasoning_tokens",
+                            ):
+                                _sel_parts.append("0")
+                            elif c in ("estimated_cost_usd", "actual_cost_usd"):
+                                _sel_parts.append("0.0")
+                            elif c == "first_seen" or c == "last_seen":
+                                _sel_parts.append("NULL")
+                            else:
+                                _sel_parts.append("''")
+                    _sel = ", ".join(_sel_parts)
+                    cursor.execute(
+                        f"INSERT INTO session_model_usage SELECT {_sel} "
+                        "FROM session_model_usage_broken"
+                    )
+                    cursor.execute("DROP TABLE session_model_usage_broken")
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_session_model_usage_session "
+                        "ON session_model_usage(session_id)"
+                    )
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_session_model_usage_model "
+                        "ON session_model_usage(model)"
+                    )
+            except sqlite3.OperationalError as exc:
+                logger.warning(
+                    "session_model_usage PK repair failed: %s "
+                    "— token accounting may still be silently broken",
+                    exc,
+                )
+
             if current_version < 23:
                 # v23: FTS storage redesign (issues #22478, #43690, #55233).
                 # The v11 inline-mode FTS tables each store a full private
@@ -4957,24 +5092,44 @@ class SessionDB:
                 )
             conn.execute(sql, params)
             if record_model_usage:
-                self._record_model_usage(
-                    conn,
-                    session_id,
-                    model=model,
-                    billing_provider=billing_provider,
-                    billing_base_url=billing_base_url,
-                    billing_mode=billing_mode,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    actual_cost_usd=actual_cost_usd,
-                    cost_status=cost_status,
-                    cost_source=cost_source,
-                    api_call_count=api_call_count,
-                )
+                try:
+                    self._record_model_usage(
+                        conn,
+                        session_id,
+                        model=model,
+                        billing_provider=billing_provider,
+                        billing_base_url=billing_base_url,
+                        billing_mode=billing_mode,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cache_read_tokens=cache_read_tokens,
+                        cache_write_tokens=cache_write_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        estimated_cost_usd=estimated_cost_usd,
+                        actual_cost_usd=actual_cost_usd,
+                        cost_status=cost_status,
+                        cost_source=cost_source,
+                        api_call_count=api_call_count,
+                    )
+                except sqlite3.OperationalError as exc:
+                    # _record_model_usage uses a 6-column ON CONFLICT target
+                    # (session_id, model, billing_provider, billing_base_url,
+                    # billing_mode, task).  If an upgraded database still has
+                    # the older 3- or 5-column session_model_usage primary key
+                    # (v22 migration failed/was interrupted), SQLite raises
+                    # "ON CONFLICT clause does not match any PRIMARY KEY or
+                    # UNIQUE constraint".  This is the aux attribution table
+                    # only — the sessions row update above must NOT be rolled
+                    # back for a secondary table failure.  Log a warning so
+                    # the user knows their per-model breakdown is stale, and
+                    # let the sessions counters persist.
+                    logger.warning(
+                        "session_model_usage write failed (session=%s): %s "
+                        "— per-model attribution is stale but session counters "
+                        "persisted. Run 'hermes sessions repair' or delete "
+                        "~/.hermes/state.db to reset.",
+                        session_id, exc,
+                    )
         self._execute_write(_do)
 
     def _record_model_usage(
