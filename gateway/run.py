@@ -12646,7 +12646,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
+            # Trust-boundary: reply text and author come from the network
+            # (e.g. Matrix). Collapse embedded newlines so they cannot escape
+            # the prefix and inject new prompt sections (fake headings,
+            # override blocks, etc.).
+            assert event.reply_to_text is not None  # guarded by getattr above
+            reply_snippet = neutralize_untrusted_inline_text(
+                event.reply_to_text[:500]
+            )
             if getattr(event, "reply_to_is_own_message", False):
                 message_text = (
                     f'[Replying to your previous message: "{reply_snippet}"]\n\n'
@@ -12660,6 +12667,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     or getattr(event, "reply_to_author_id", None)
                 )
                 if reply_author:
+                    reply_author = neutralize_untrusted_inline_text(reply_author)
                     message_text = (
                         f'[Replying to {reply_author}: "{reply_snippet}"]\n\n'
                         f"{message_text}"

@@ -16421,6 +16421,20 @@ def main(
     
     # Handle single query mode
     if query or image:
+        # Single-query (`hermes chat -q`) is a short-lived process that exits
+        # after one turn. There is no later turn for a detached subagent's
+        # completion to re-enter, and nothing here drains
+        # process_registry.completion_queue. Left unbound,
+        # async_delivery_supported() defaults True, delegate_task is forced
+        # background, and every subagent result is discarded (the parent exit
+        # kills the child with "Interrupted N async delegation(s)"). Declaring
+        # the channel stateless routes delegate_task to its inline/synchronous
+        # path so the result is returned within the turn. Same rationale as
+        # hermes -z (oneshot) — see hermes_cli/oneshot.py and #66617.
+        from gateway.session_context import declare_stateless_channel
+
+        declare_stateless_channel()
+
         if not cli._claim_active_session("cli", stderr=bool(quiet)):
             sys.exit(1)
         try:

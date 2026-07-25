@@ -3983,6 +3983,17 @@ class MatrixAdapter(BasePlatformAdapter):
         if not sender and isinstance(event, dict):
             sender = str(event.get("sender", ""))
 
+        # Trust-boundary: the replied-to event may originate from an
+        # unauthorized sender (e.g. a bridge bot or ignored user). Do not
+        # surface their identity or text unless the adapter would accept them
+        # as a normal inbound message.
+        if sender and self._matches_ignored_user_pattern(sender):
+            logger.debug(
+                "Matrix: suppressing reply context from ignored sender %s",
+                sender,
+            )
+            return _EMPTY_REPLY_CONTEXT
+
         author_name = await self._get_display_name(room_id, sender) if sender else ""
         own = (self._user_id or "").strip().lower()
         is_own = bool(own) and sender.strip().lower() == own
