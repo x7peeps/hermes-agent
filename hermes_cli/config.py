@@ -5831,7 +5831,174 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 f"Move '{key}' under the appropriate section",
             ))
 
+    # ── providers: section (dict) — validate structure and detect conflicts ──
+    providers = config.get("providers")
+    if providers is not None and isinstance(providers, dict):
+        for pname, pentry in providers.items():
+            if not isinstance(pentry, dict):
+                issues.append(ConfigIssue(
+                    "error",
+                    f"providers.{pname} should be a dict, got {type(pentry).__name__}",
+                    f"Define {pname} with at minimum: base_url and model fields",
+                ))
+                continue
+            # A providers entry that has a "models" list constrains which
+            # models are selectable — warn if the list is empty or missing
+            # the currently selected model.
+            pmodels = pentry.get("models")
+            if pmodels is not None:
+                if not isinstance(pmodels, list):
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"providers.{pname}.models should be a list, got {type(pmodels).__name__}",
+                        "Change to a YAML list (items prefixed with '-')",
+                    ))
+                elif len(pmodels) == 0:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"providers.{pname}.models is an empty list — no models will be selectable for this provider",
+                        "Add model names to the list or remove the models key to allow all models",
+                    ))
+
+    # ── Dual storage conflict: same provider name in both providers: and custom_providers: ──
+    if isinstance(providers, dict) and isinstance(cp, list):
+        provider_names = {k.lower() for k in providers}
+        for entry in cp:
+            if isinstance(entry, dict):
+                cp_name = (entry.get("name") or "").lower()
+                if cp_name and cp_name in provider_names:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"Provider '{entry.get('name')}' appears in both 'providers:' and 'custom_providers:' with potentially different configs — this can cause CLI/GUI mismatch",
+                        "Remove the duplicate from one section or ensure both entries have identical settings",
+                    ))
+
+    # ── fallback_providers: validate that referenced providers actually exist ──
+    fallback_providers = config.get("fallback_providers")
+    if isinstance(fallback_providers, list):
+        # Build the set of all known provider identifiers
+        known_provider_ids = _collect_known_provider_ids(config)
+        for i, entry in enumerate(fallback_providers):
+            if not isinstance(entry, dict):
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"fallback_providers[{i}] should be a dict, got {type(entry).__name__}",
+                    "Each entry needs at minimum: provider",
+                ))
+                continue
+            fb_provider = (entry.get("provider") or "").strip()
+            if not fb_provider:
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"fallback_providers[{i}] is missing 'provider' field",
+                    "Add: provider: <provider-name>",
+                ))
+                continue
+            # Resolve through aliases and check against known providers
+            canonical = _normalize_provider_name(fb_provider)
+            if canonical not in known_provider_ids:
+                issues.append(ConfigIssue(
+                    "error",
+                    f"fallback_providers[{i}] references provider '{fb_provider}' which has no config entry — fallback will fail silently",
+                    f"Add a '{fb_provider}' entry to 'providers:' or 'custom_providers:', or remove this fallback entry",
+                ))
+
+    # ── Auxiliary task slots: validate provider references ──
+    auxiliary = config.get("auxiliary")
+    if isinstance(auxiliary, dict):
+        known_provider_ids = _collect_known_provider_ids(config)
+        for task_name, task_cfg in auxiliary.items():
+            if not isinstance(task_cfg, dict):
+                continue
+            aux_provider = (task_cfg.get("provider") or "").strip()
+            if not aux_provider or aux_provider.lower() == "auto":
+                continue
+            # Resolve through aliases
+            canonical = _normalize_provider_name(aux_provider)
+            if canonical not in known_provider_ids:
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"auxiliary.{task_name}.provider '{aux_provider}' does not match any known provider — this task may silently fail",
+                    f"Check the provider name (e.g. 'custom:sensenova-ds4f' not 'custom:sensenova')",
+                ))
+
+    # ── Legacy curator.auxiliary block (deprecated) ──
+    curator = config.get("curator")
+    if isinstance(curator, dict):
+        curator_aux = curator.get("auxiliary")
+        if isinstance(curator_aux, dict):
+            curator_provider = (curator_aux.get("provider") or "").strip()
+            if curator_provider and curator_provider.lower() != "auto":
+                known_provider_ids = _collect_known_provider_ids(config)
+                canonical = _normalize_provider_name(curator_provider)
+                if canonical not in known_provider_ids:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"curator.auxiliary.provider '{curator_provider}' does not match any known provider — curator review may silently fail (consider migrating to auxiliary.curator)",
+                        "Check the provider name and consider migrating to auxiliary.curator.{provider,model}",
+                    ))
+
     return issues
+
+
+def _normalize_provider_name(name: str) -> str:
+    """Normalize a provider name through the same alias resolution as the CLI.
+
+    Returns the canonical provider id string.  This is a lightweight
+    reimplementation of ``hermes_cli.providers.normalize_provider`` so
+    config validation doesn't need to import the full provider machinery.
+    """
+    from hermes_cli.providers import normalize_provider as _np
+    return _np(name)
+
+
+def _collect_known_provider_ids(config: Dict[str, Any]) -> Set[str]:
+    """Return the set of all provider identifiers known to this config.
+
+    Covers:
+    - Built-in provider IDs (via providers.py)
+    - ``providers:`` dict keys
+    - ``custom_providers:`` list entries (as ``custom:<name>`` slugs and bare names)
+    - Provider names from model config and fallback chains
+    """
+    ids: Set[str] = set()
+
+    # Built-in providers
+    try:
+        from hermes_cli.providers import ALIASES, HERMES_OVERLAYS
+        for alias, canonical in ALIASES.items():
+            ids.add(alias.lower())
+            ids.add(canonical.lower())
+        for overlay_id in HERMES_OVERLAYS:
+            ids.add(overlay_id.lower())
+        # Also pull in models.dev if available
+        try:
+            from agent.models_dev import PROVIDER_CATALOG
+            for pid in PROVIDER_CATALOG:
+                ids.add(pid.lower())
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # User-defined providers from ``providers:`` dict
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for k in providers:
+            ids.add(k.lower())
+
+    # Custom providers from ``custom_providers:`` list
+    custom_providers = config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        from hermes_cli.providers import custom_provider_slug
+        for entry in custom_providers:
+            if isinstance(entry, dict):
+                name = entry.get("name") or ""
+                if name:
+                    ids.add(name.lower())
+                    ids.add(custom_provider_slug(name).lower())
+
+    return ids
 
 
 def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:
