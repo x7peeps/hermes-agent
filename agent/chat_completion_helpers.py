@@ -985,6 +985,26 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
 
+    # Safety-net MCP refresh: if MCP tools were registered after this agent's
+    # tool snapshot (e.g. background discovery finished just before the first
+    # API call, or a /reload-mcp arrived mid-turn), pull them in now so the
+    # model sees them.  Uses the same registry._generation staleness gate as
+    # refresh_agent_mcp_tools, but is cheaper — only fires when the generation
+    # has advanced AND there are actually registered MCP tools.  This catches
+    # the classic race condition with custom/Ollama providers where the MCP
+    # server connects within the bounded startup wait but the agent snapshot
+    # was taken a few milliseconds earlier. (#71736)
+    _agent_gen = getattr(agent, "_tool_snapshot_generation", None)
+    if _agent_gen is not None:
+        import sys as _sys
+        if "tools.mcp_tool" in _sys.modules:
+            from tools.mcp_tool import has_registered_mcp_tools
+            from tools.registry import registry as _bak_registry
+            if has_registered_mcp_tools() and _bak_registry._generation > _agent_gen:
+                from tools.mcp_tool import refresh_agent_mcp_tools
+                refresh_agent_mcp_tools(agent, quiet_mode=True)
+                tools_for_api = agent.tools
+
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
         anthropic_messages = agent._prepare_anthropic_messages_for_api(api_messages)
