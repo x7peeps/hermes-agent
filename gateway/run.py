@@ -838,12 +838,36 @@ def _is_fresh_gateway_interruption(
     return current - timestamp <= window
 
 
+# Pattern that matches sender-only attribution in shared multi-user sessions,
+# e.g. ``[Example User] `` or ``[Alice | Slack user <@U123>]`` with no actual
+# content after the closing bracket.  When the startup auto-resume turn (empty
+# text) flows through the shared-session prefix logic, the message arrives here
+# as only a sender tag — the ``if message:`` check below would incorrectly
+# treat it as a real user message (#72280).
+_SENDER_ONLY_RE = re.compile(r"^\[.+?\]\s*$", re.DOTALL)
+
+
+def _is_effective_message(text: str) -> bool:
+    """Return True when *text* carries real user content.
+
+    Returns ``False`` for the empty string and for sender-only attribution
+    prefixes that arrive when an empty auto-resume turn passes through the
+    shared-session sender-prefix step (``[display name] `` with nothing
+    substantive after it).
+    """
+    if not text:
+        return False
+    if _SENDER_ONLY_RE.match(text):
+        return False
+    return True
+
+
 def build_resume_recovery_note(
     reason: Optional[str],
     message: str = "",
     *,
     interactive: bool = True,
-) -> str:
+) -> Optional[str]:
     """Build the resume-pending recovery system note for an interrupted turn.
 
     ``reason`` is the session's ``resume_reason`` (``restart_timeout``,
@@ -859,7 +883,12 @@ def build_resume_recovery_note(
     resumed turn must instead complete the interrupted work, or the task is
     silently abandoned behind a "restored" acknowledgement that goes
     nowhere (#57056).
+
+    Returns ``None`` for an empty/sender-only message on an interactive
+    platform — the caller should skip the model invocation entirely instead
+    of synthesising a "what would you like to do next?" reply (#72280).
     """
+    has_content = _is_effective_message(message)
     reason_phrase = (
         "a gateway restart"
         if reason == "restart_timeout"
@@ -867,7 +896,7 @@ def build_resume_recovery_note(
         if reason == "shutdown_timeout"
         else "a gateway interruption"
     )
-    if message:
+    if has_content:
         resume_guidance = (
             "Address the user's NEW message below FIRST and focus "
             "on what the user is asking now."
@@ -877,14 +906,10 @@ def build_resume_recovery_note(
             "unfinished work from the conversation history."
         )
     elif interactive:
-        resume_guidance = (
-            "Report to the user that the session was restored "
-            "successfully and ask what they would like to do next."
-        )
-        tail_guidance = (
-            "Do NOT re-execute old tool calls — skip any "
-            "unfinished work from the conversation history."
-        )
+        # No real content and a human IS present — skip the model entirely.
+        # Producing a generic "what next?" prompt after every gateway restart
+        # is noise (#72280).
+        return None
     else:
         resume_guidance = (
             "No user is present on this non-interactive platform, "
@@ -903,7 +928,7 @@ def build_resume_recovery_note(
         f"Any restart/shutdown command in the history has already "
         f"run — do NOT re-execute or verify it. {resume_guidance} "
         f"{tail_guidance}]"
-        + (f"\n\n{message}" if message else "")
+        + (f"\n\n{message}" if has_content else "")
     )
 
 
@@ -22163,18 +22188,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # The empty-message case is the auto-resume startup turn
                 # synthesized by _schedule_resume_pending_sessions — there is
                 # no NEW user message to address.  Guidance is adapter-aware:
-                # interactive platforms report the restore and ask what next;
-                # non-interactive event platforms (webhook, API server)
+                # interactive platforms skip the model entirely (no "what next?"
+                # noise); non-interactive event platforms (webhook, API server)
                 # continue the interrupted work instead, because nobody is
                 # present to answer and an acknowledgement would silently
-                # abandon the task (#57056).
+                # abandon the task (#57056, #72280).
                 _resume_adapter = self._adapter_for_source(source)
                 _interactive_resume = bool(
                     getattr(_resume_adapter, "interactive_resume", True)
                 )
-                message = build_resume_recovery_note(
+                _recovery_note = build_resume_recovery_note(
                     _reason, message, interactive=_interactive_resume,
                 )
+                if _recovery_note is None:
+                    # Interactive empty auto-resume: skip the model entirely
+                    # to avoid "what would you like to do next?" noise.
+                    logger.debug(
+                        "Skipping interactive empty auto-resume for %s (no real user content)",
+                        session_key,
+                    )
+                    return {
+                        "final_response": "",
+                        "session_id": session_id,
+                        "skipped_resume": True,
+                    }
+                message = _recovery_note
             elif _has_fresh_tool_tail:
                 _persist_user_message_override = message
                 message = (
@@ -22215,13 +22253,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
                 )
                 _sn_adapter = self._adapter_for_source(source)
-                message = build_resume_recovery_note(
+                _sn_note = build_resume_recovery_note(
                     _sn_reason,
                     "",
                     interactive=bool(
                         getattr(_sn_adapter, "interactive_resume", True)
                     ),
                 )
+                if _sn_note is None:
+                    logger.debug(
+                        "Skipping interactive empty auto-resume (safety net) for %s",
+                        session_key,
+                    )
+                    return {
+                        "final_response": "",
+                        "session_id": session_id,
+                        "skipped_resume": True,
+                    }
+                message = _sn_note
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
