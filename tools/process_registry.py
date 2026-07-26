@@ -39,8 +39,10 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 
 _IS_WINDOWS = platform.system() == "Windows"
+_IS_LINUX = platform.system() == "Linux"
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
@@ -85,6 +87,126 @@ def format_uptime_short(seconds: int) -> str:
         return f"{mins}m {secs}s"
     hours, mins = divmod(mins, 60)
     return f"{hours}h {mins}m"
+
+
+def _running_under_systemd() -> bool:
+    """Return True if this process appears to be managed by systemd."""
+    if not _IS_LINUX or _IS_WINDOWS:
+        return False
+    # INVOCATION_ID is set by systemd for every unit it launches.
+    if os.environ.get("INVOCATION_ID"):
+        return True
+    # Fallback: check if our cgroup path ends with a .service unit name.
+    try:
+        text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+        # cgroup v2: single line like "0::/user.slice/.../hermes-gateway.service"
+        for line in text.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) >= 3 and parts[2].rstrip("/").endswith(".service"):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _systemd_scope_flags() -> list:
+    """Detect whether the caller is a user or system systemd service.
+
+    Returns ``["--user"]`` for user services, ``[]`` for system services.
+    """
+    try:
+        # Walk our own cgroup to find the unit name.
+        text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            path = parts[2].rstrip("/")
+            unit = path.rsplit("/", 1)[-1]
+            if unit.endswith(".service"):
+                # Check if this unit is registered in user scope.
+                import shutil
+                systemctl = shutil.which("systemctl")
+                if systemctl:
+                    out = subprocess.run(
+                        [systemctl, "--user", "show", unit,
+                         "--property=MainPID", "--value"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    if out.returncode == 0 and out.stdout.strip():
+                        return ["--user"]
+                # If user scope check fails, try system scope.
+                return []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    # Default to --user: hermes gateway is typically a user service.
+    return ["--user"]
+
+
+def _spawn_systemd_scope(
+    command: str,
+    env: dict,
+    cwd: Optional[str],
+    scope_flags: list,
+) -> "subprocess.Popen | None":
+    """Try to spawn *command* via systemd-run in a transient scope cgroup.
+
+    Returns a Popen handle on success, or None if systemd-run is not
+    available / not usable.
+
+    Why: ``start_new_session=True`` creates a new process session/group but
+    does NOT create a new resource cgroup.  On Linux/systemd, children
+    inherit the parent's cgroup, so a memory-heavy background executor
+    can cause ``systemd-oomd`` to kill the entire gateway service cgroup
+    (issue #70716).  ``systemd-run --scope`` places the child in its own
+    transient cgroup with independent memory accounting.
+    """
+    import shutil
+    systemd_run = shutil.which("systemd-run")
+    if not systemd_run:
+        return None
+
+    # Build a unique unit name so transient scopes don't collide.
+    unit_name = f"hermes-exec-{uuid.uuid4().hex[:8]}"
+
+    # systemd-run --scope --collect ensures the scope is torn down when the
+    # process exits.  We pass the command through bash -lc so the
+    # user's rc files are sourced (same as the non-systemd path).
+    # Note: systemd-run -- expects the COMMAND+ARGS as separate argv elements,
+    # so we pass bash explicitly.
+    cmd = [
+        systemd_run,
+        *scope_flags,
+        "--scope",
+        "--collect",
+        "--unit", unit_name,
+        "--",
+        "bash",
+        "-lic",
+        f"set +m; {command}",
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            text=True,
+            cwd=cwd,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.info(
+            "spawn_local: using systemd-run --scope (unit=%s, scope=%s) for cgroup isolation",
+            unit_name, "user" if "--user" in scope_flags else "system",
+        )
+        return proc
+    except Exception as e:
+        logger.warning("systemd-run --scope failed (%s), falling back to plain spawn", e)
+        return None
 
 
 @dataclass
@@ -768,20 +890,41 @@ class ProcessRegistry:
         bg_env["PYTHONUNBUFFERED"] = "1"
         _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
 
-        proc = subprocess.Popen(
-            [user_shell, "-lic", f"set +m; {command}"],
-            text=True,
-            cwd=session.cwd,
-            env=bg_env,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            **_popen_kwargs,
-        )
+        # When running under systemd, isolate the child into its own transient
+        # scope cgroup via ``systemd-run --scope`` so that memory-heavy
+        # background commands don't pull the gateway's cgroup over the
+        # systemd-oomd threshold (issue #70716).
+        proc = None
+        if not _IS_WINDOWS and _running_under_systemd():
+            scope_flags = _systemd_scope_flags()
+            proc = _spawn_systemd_scope(
+                command=command,
+                env=bg_env,
+                cwd=session.cwd,
+                scope_flags=scope_flags,
+            )
 
+        if proc is None:
+            # Fallback: plain Popen with start_new_session for cgroup-less
+            # environments (macOS, non-systemd Linux, Windows, or systemd-run
+            # not available).
+            proc = subprocess.Popen(
+                [user_shell, "-lic", f"set +m; {command}"],
+                text=True,
+                cwd=session.cwd,
+                env=bg_env,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                **_popen_kwargs,
+            )
+
+        # proc is guaranteed non-None at this point (either from systemd-run
+        # or the fallback Popen).
+        assert proc is not None
         session.process = proc
         session.pid = proc.pid
         session.host_start_time = self._safe_host_start_time(session.pid)
