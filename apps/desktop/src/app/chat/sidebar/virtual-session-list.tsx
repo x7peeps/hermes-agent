@@ -15,13 +15,14 @@ interface SessionRowCommonProps {
   isPinned: boolean
   isSelected: boolean
   isWorking: boolean
+  isMultiSelected: boolean
   onArchive: () => void
   onBranch?: () => void
   onDelete: () => void
   onPin: () => void
   onResume: () => void
+  onToggleMultiSelect: () => void
   reorderable?: boolean
-  showProfile?: boolean
 }
 
 interface VirtualSessionListProps {
@@ -33,8 +34,9 @@ interface VirtualSessionListProps {
   onDeleteSession: (sessionId: string) => void
   onResumeSession: (sessionId: string) => void
   onTogglePin: (sessionId: string) => void
+  onToggleMultiSelect?: (sessionId: string) => void
+  selectedMultiSessionIds?: ReadonlySet<string>
   pinned: boolean
-  showProfileTags?: boolean
   sortable: boolean
   workingSessionIdSet: Set<string>
 }
@@ -52,10 +54,11 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
   onResumeSession,
   onTogglePin,
   pinned,
-  showProfileTags = false,
   sortable,
-  workingSessionIdSet
-}) => {
+  workingSessionIdSet,
+  onToggleMultiSelect,
+  selectedMultiSessionIds
+}: VirtualSessionListProps) {
   const scrollerRef = useRef<HTMLDivElement | null>(null)
 
   const virtualizer = useVirtualizer({
@@ -88,13 +91,14 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       isPinned: pinned,
       isSelected: session.id === activeSessionId,
       isWorking: workingSessionIdSet.has(session.id),
+      isMultiSelected: selectedMultiSessionIds?.has(session.id) ?? false,
       onArchive: () => onArchiveSession(session.id),
       onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
       onDelete: () => onDeleteSession(session.id),
       onPin: () => onTogglePin(sessionPinId(session)),
       onResume: () => onResumeSession(session.id),
-      reorderable,
-      showProfile: showProfileTags
+      onToggleMultiSelect: onToggleMultiSelect ? () => onToggleMultiSelect(session.id) : () => {},
+      reorderable
     }
 
     return reorderable ? (

@@ -15,12 +15,11 @@ import {
   setSessionsLoading,
   setSessionsTotal
 } from '@/store/session'
-import { $stalledSessionIds } from '@/store/session-states'
 
 import { $gatewaySwitching, wipeSessionListsForGatewaySwitch } from './gateway-switch'
 
 vi.mock('@/lib/query-client', () => ({
-  invalidateProfileScopedQueries: vi.fn()
+  queryClient: { invalidateQueries: vi.fn() }
 }))
 
 describe('wipeSessionListsForGatewaySwitch', () => {
@@ -30,7 +29,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     setSessionsTotal(1)
     setCronSessions([{ id: 'c1', title: 'cron', profile: 'default' } as never])
     setMessagingSessions([{ id: 'm1', title: 'tg', profile: 'default' } as never])
-    $stalledSessionIds.set(['s1'])
     setSessionsLoading(false)
     setFreshDraftReady(false)
     $sessionsLimit.set(SIDEBAR_SESSIONS_PAGE_SIZE * 3)
@@ -41,7 +39,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     setSessions([])
     setCronSessions([])
     setMessagingSessions([])
-    $stalledSessionIds.set([])
     setSessionsLoading(true)
     $gatewaySwitching.set(false)
   })
@@ -53,7 +50,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect($sessionsTotal.get()).toBe(0)
     expect($cronSessions.get()).toEqual([])
     expect($messagingSessions.get()).toEqual([])
-    expect($stalledSessionIds.get()).toEqual([])
     expect($sessionsLoading.get()).toBe(true)
     expect($sessionsLimit.get()).toBe(SIDEBAR_SESSIONS_PAGE_SIZE)
     expect($freshDraftReady.get()).toBe(true)

@@ -7,8 +7,7 @@ import {
   isRemoteConfig,
   isRemoteReauthError,
   isRemoteReauthFailure,
-  signInLabel,
-  sshFailureMessage
+  signInLabel
 } from './boot-failure-reauth'
 
 function config(overrides: Partial<DesktopConnectionConfig> = {}): DesktopConnectionConfig {
@@ -22,11 +21,6 @@ function config(overrides: Partial<DesktopConnectionConfig> = {}): DesktopConnec
     remoteTokenSet: false,
     remoteUrl: 'https://box:9119',
     cloudOrg: '',
-    sshHost: '',
-    sshUser: '',
-    sshPort: null,
-    sshKeyPath: '',
-    sshRemoteHermesPath: '',
     ...overrides
   }
 }
@@ -37,20 +31,8 @@ describe('isRemoteConfig', () => {
     expect(isRemoteConfig(config({ mode: 'cloud', remoteOauthConnected: true }))).toBe(true)
   })
 
-  it('recognizes SSH as remote recovery without treating it as OAuth reauth', () => {
-    const ssh = config({ mode: 'ssh' as never, remoteUrl: '', remoteAuthMode: 'token' }) as DesktopConnectionConfig & {
-      sshHost: string
-    }
-
-    ssh.sshHost = 'remote-box'
-
-    expect(isRemoteConfig(ssh)).toBe(true)
-    expect(isRemoteReauthFailure(ssh, 'SSH authentication failed.')).toBe(false)
-  })
-
-  it('false for local, incomplete SSH, a remote with no URL, and nullish', () => {
+  it('false for local, for a remote with no URL, and for nullish', () => {
     expect(isRemoteConfig(config({ mode: 'local' }))).toBe(false)
-    expect(isRemoteConfig(config({ mode: 'ssh' as never, remoteUrl: '' }))).toBe(false)
     expect(isRemoteConfig(config({ remoteUrl: '' }))).toBe(false)
     expect(isRemoteConfig(null)).toBe(false)
   })
@@ -108,16 +90,6 @@ describe('isRemoteReauthError', () => {
   it('ignores non-auth boot errors and nullish', () => {
     expect(isRemoteReauthError('Hermes background process exited during startup.')).toBe(false)
     expect(isRemoteReauthError(null)).toBe(false)
-  })
-})
-
-describe('sshFailureMessage', () => {
-  it('localizes SSH failures without changing non-SSH errors', () => {
-    const copy = { sshErrAuth: 'localized auth', sshErrUnknown: 'localized unknown' }
-    const ssh = config({ mode: 'ssh', sshHost: 'box', remoteUrl: '' })
-    expect(sshFailureMessage(ssh, 'SSH authentication failed', copy)).toBe('localized auth')
-    expect(sshFailureMessage(ssh, 'unexpected failure', copy)).toBe('localized unknown')
-    expect(sshFailureMessage(config(), 'raw remote error', copy)).toBe('raw remote error')
   })
 })
 

@@ -264,14 +264,11 @@ def _resolve_mcp_server_config(config: dict) -> dict:
     """
     from tools.mcp_tool import _interpolate_env_vars
 
-    from agent.secret_scope import current_secret_scope
-
-    if current_secret_scope() is None:
-        try:
-            from hermes_cli.env_loader import load_hermes_dotenv
-            load_hermes_dotenv()
-        except Exception:  # pragma: no cover — defensive
-            pass
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv()
+    except Exception:  # pragma: no cover — defensive
+        pass
     return _interpolate_env_vars(config)
 
 

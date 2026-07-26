@@ -6,7 +6,6 @@ import { Codicon } from '@/components/ui/codicon'
 import { ErrorIcon } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
 import { LogView } from '@/components/ui/log-view'
-import { Progress } from '@/components/ui/progress'
 import type {
   DesktopBootstrapEvent,
   DesktopBootstrapStageDescriptor,
@@ -436,12 +435,12 @@ export function DesktopInstallOverlay({ enabled = true }: DesktopInstallOverlayP
                 </span>
                 <span className="tabular-nums">{progressPct}%</span>
               </div>
-              <Progress
-                aria-label={copy.progress(completedCount, totalCount)}
-                className="bg-(--ui-bg-tertiary)"
-                destructive={failed}
-                value={progressPct / 100}
-              />
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-(--ui-bg-tertiary)">
+                <div
+                  className={cn('h-full transition-all duration-300', failed ? 'bg-destructive' : 'bg-primary')}
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
             </div>
           )}
 

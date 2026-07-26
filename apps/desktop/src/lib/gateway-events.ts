@@ -24,7 +24,6 @@ const UNSCOPED_STREAM_EVENT_TYPES = new Set([
   'error',
   'message.complete',
   'message.delta',
-  'message.interim',
   'message.start',
   'reasoning.available',
   'reasoning.delta',

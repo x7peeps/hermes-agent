@@ -1,7 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 
-import { ProfileTag } from '@/app/chat/profile-tag'
 import { startSessionDrag } from '@/app/chat/session-drag'
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
@@ -14,15 +13,13 @@ import { triggerHaptic } from '@/lib/haptics'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
 import { coarseElapsed } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { $attentionSessionIds, openSessionTile } from '@/store/session-states'
+import { $backgroundRunningSessionIds } from '@/store/composer-status'
+import { $attentionSessionIds, $unreadFinishedSessionIds } from '@/store/session'
+import { openSessionTile } from '@/store/session-states'
 import { canOpenSessionWindow, openSessionInNewWindow } from '@/store/windows'
-
-import { SessionStatusDot } from '../session-status-dot'
 
 import { SidebarRowBody, SidebarRowGrab, SidebarRowLabel, SidebarRowLead, SidebarRowShell } from './chrome'
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
-import { sessionShowsRunningArc } from './session-row-state'
-import { useProfilePrewarm } from './use-profile-prewarm'
 
 interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
   session: SessionInfo
@@ -31,18 +28,16 @@ interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
   isPinned: boolean
   isSelected: boolean
   isWorking: boolean
+  isMultiSelected: boolean
   onArchive: () => void
   onBranch?: () => void
   onDelete: () => void
   onPin: () => void
   onResume: () => void
+  onToggleMultiSelect: () => void
   reorderable?: boolean
   dragging?: boolean
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
-  /** Tag the row with its owning profile (initial chip + tooltip). Used by
-   *  flat cross-profile lists — Pinned and search results in the All-profiles
-   *  view — where no group header communicates ownership (#66003). */
-  showProfile?: boolean
 }
 
 const AGE_KEY = { day: 'ageDay', hour: 'ageHour', minute: 'ageMin' } as const
@@ -60,15 +55,16 @@ export function SidebarSessionRow({
   isPinned,
   isSelected,
   isWorking,
+  isMultiSelected,
   onArchive,
   onBranch,
   onDelete,
   onPin,
   onResume,
+  onToggleMultiSelect,
   reorderable = false,
   dragging = false,
   dragHandleProps,
-  showProfile = false,
   className,
   style,
   ref,
@@ -76,7 +72,6 @@ export function SidebarSessionRow({
 }: SidebarSessionRowProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
-  const { cancelPrewarm, startPrewarm } = useProfilePrewarm(session.profile)
   const title = sessionTitle(session)
   const age = formatAge(session.last_active || session.started_at, r)
   const handleLabel = `Reorder ${title}`
@@ -87,6 +82,24 @@ export function SidebarSessionRow({
   const handoffLabel = handoffSource ? (sessionSourceLabel(handoffSource) ?? handoffSource) : null
   // True when a clarify prompt in this session is waiting on the user.
   const needsInput = useStore($attentionSessionIds).includes(session.id)
+  // True when the session's most recent turn finished in the background (while
+  // the user was viewing a different session) and hasn't been opened since.
+  const isUnread = useStore($unreadFinishedSessionIds).includes(session.id)
+  // True when a terminal(background=true) process is alive in this session.
+  const hasBackground = useStore($backgroundRunningSessionIds).includes(session.id)
+
+  // Resolve the dot's display state once — the four signals are mutually
+  // exclusive by priority, so threading them as booleans through wrappers just
+  // to collapse them at the leaf is backwards.
+  const dotState: SessionDotState = needsInput
+    ? 'needs-input'
+    : isWorking
+      ? 'working'
+      : hasBackground
+        ? 'background'
+        : isUnread
+          ? 'unread'
+          : 'idle'
 
   return (
     <SessionContextMenu
@@ -102,6 +115,11 @@ export function SidebarSessionRow({
       <SidebarRowShell
         actions={
           <div className="relative z-2 grid w-[1.375rem] place-items-center" data-row-actions>
+            {isMultiSelected && (
+              <span className="pointer-events-none absolute -left-1 top-1/2 min-w-6 -translate-y-1/2 text-right text-[0.625rem] leading-none text-(--ui-accent)">
+                <Codicon name="check" size="0.75rem" />
+              </span>
+            )}
             {!isWorking && (
               <span className="pointer-events-none absolute right-6 top-1/2 min-w-6 -translate-y-1/2 text-right text-[0.625rem] leading-none text-(--ui-text-tertiary) opacity-0 transition-opacity group-hover:opacity-100">
                 {age}
@@ -116,7 +134,6 @@ export function SidebarSessionRow({
               profile={session.profile}
               sessionId={session.id}
               title={title}
-              tooltip={r.actionsFor(title)}
             >
               <Button
                 aria-label={r.actionsFor(title)}
@@ -132,6 +149,7 @@ export function SidebarSessionRow({
         className={cn(
           'group row-hover relative',
           isSelected && 'bg-(--ui-row-active-background)',
+          isMultiSelected && 'bg-(--ui-accent)/8 ring-1 ring-inset ring-(--ui-accent)/20',
           isWorking && 'text-foreground',
           // Opaque surface while lifted so the dragged row erases what's under
           // it (translucency let the rows below bleed through).
@@ -153,17 +171,11 @@ export function SidebarSessionRow({
 
           startSessionDrag({ id: session.id, profile: session.profile || 'default', title }, event)
         }}
-        // Hovering a row from another profile (the all-profiles view) telegraphs
-        // a cross-profile resume — start that backend's spawn now so the click
-        // doesn't pay the full cold boot. Same-profile rows no-op inside
-        // prewarmProfileBackend.
-        onPointerEnter={startPrewarm}
-        onPointerLeave={cancelPrewarm}
         ref={ref}
         style={style}
         {...rest}
       >
-        {sessionShowsRunningArc({ isWorking, needsInput }) && <span aria-hidden="true" className="arc-border" />}
+        {isWorking && !needsInput && <span aria-hidden="true" className="arc-border" />}
         <SidebarRowBody
           className={cn('z-0 group-hover:pr-12', branchStem && 'pl-3.5')}
           // Middle-click = open in a new tab (browser muscle memory). Swallow
@@ -177,10 +189,8 @@ export function SidebarSessionRow({
             }
           }}
           onClick={event => {
-            const mod = event.metaKey || event.ctrlKey
-
             // ⇧⌘-click → pop into its own window (needs standalone windows).
-            if (mod && event.shiftKey && canOpenSessionWindow()) {
+            if (event.metaKey && event.shiftKey && canOpenSessionWindow()) {
               event.preventDefault()
               event.stopPropagation()
               triggerHaptic('selection')
@@ -189,8 +199,8 @@ export function SidebarSessionRow({
               return
             }
 
-            // ⌘/⌃-click → open in a new tab (stack into main).
-            if (mod) {
+            // ⌘-click → open in a new tab (stack into main).
+            if (event.metaKey) {
               event.preventDefault()
               event.stopPropagation()
               triggerHaptic('selection')
@@ -199,12 +209,22 @@ export function SidebarSessionRow({
               return
             }
 
-            // ⇧-click → pin.
-            if (event.shiftKey) {
+            // ⌃-click → pin.
+            if (event.ctrlKey) {
               event.preventDefault()
               event.stopPropagation()
               triggerHaptic('selection')
               onPin()
+
+              return
+            }
+
+            // ⇧-click → toggle multi-select.
+            if (event.shiftKey) {
+              event.preventDefault()
+              event.stopPropagation()
+              triggerHaptic('selection')
+              onToggleMultiSelect()
 
               return
             }
@@ -220,16 +240,15 @@ export function SidebarSessionRow({
               dragHandleProps={dragHandleProps}
               leadClassName={needsInput ? 'overflow-visible' : undefined}
             >
-              <SessionStatusDot
+              <SessionRowLeadDot
                 branchStem={branchStem}
                 className="transition-opacity group-hover/handle:opacity-0 group-focus-within/handle:opacity-0"
-                session={session}
-                storedSessionId={session.id}
+                dotState={dotState}
               />
             </SidebarRowGrab>
           ) : (
             <SidebarRowLead className={needsInput ? 'overflow-visible' : 'overflow-hidden'}>
-              <SessionStatusDot branchStem={branchStem} session={session} storedSessionId={session.id} />
+              <SessionRowLeadDot branchStem={branchStem} dotState={dotState} />
             </SidebarRowLead>
           )}
           {handoffSource && handoffLabel ? (
@@ -244,9 +263,105 @@ export function SidebarSessionRow({
           <SidebarRowLabel className="flex-1 font-normal group-hover:text-foreground group-data-[working=true]:text-foreground/90">
             {title}
           </SidebarRowLabel>
-          {showProfile && <ProfileTag profile={session.profile} />}
         </SidebarRowBody>
       </SidebarRowShell>
     </SessionContextMenu>
+  )
+}
+
+/** The session's display state for the sidebar lead dot. The call site
+ *  resolves this from the four underlying signals (needs-input, working,
+ *  background, unread) so the dot component itself is a pure lookup. */
+type SessionDotState = 'background' | 'idle' | 'needs-input' | 'unread' | 'working'
+
+function SessionRowLeadDot({
+  branchStem,
+  dotState = 'idle',
+  className
+}: {
+  branchStem?: string
+  dotState?: SessionDotState
+  className?: string
+}) {
+  return (
+    <span className={cn('flex items-center gap-0.5', className)}>
+      {branchStem ? (
+        <span aria-hidden className="shrink-0 font-mono text-[0.625rem] leading-none text-(--ui-text-quaternary)">
+          {branchStem}
+        </span>
+      ) : null}
+      <SidebarRowDot dotState={dotState} />
+    </span>
+  )
+}
+
+// A pure lookup table: each state maps to its className, aria-label, and
+// title. No priority resolution here — the call site already picked one.
+// Label/title are resolved from sidebar.row translations, keyed by name.
+type DotVariant = {
+  ariaLabel?: (r: Translations['sidebar']['row']) => string
+  className: string
+  role?: 'status'
+  title?: (r: Translations['sidebar']['row']) => string
+}
+
+// Shared base for every active dot; idle is smaller and uses its own class.
+const DOT_BASE = 'relative size-1.5 rounded-full'
+
+// Pseudo-element ping ring that scales outward and fades — shared scaffold for
+// the two pulsing dots. The `before:bg-*` color is written inline per variant
+// (NOT interpolated here): Tailwind only generates utilities it can see as
+// complete static strings, so a `before:bg-${color}` template never emits.
+const PING = "before:absolute before:inset-0 before:animate-ping before:rounded-full before:content-['']"
+
+const DOT_VARIANTS: Record<SessionDotState, DotVariant> = {
+  // Amber steady — a clarify/approval is blocking the turn. Steady (not
+  // pulsing) reads as "your turn", distinct from the accent pulse of a turn.
+  'needs-input': {
+    ariaLabel: r => r.needsInput,
+    className: `${DOT_BASE} quest-glow bg-amber-500`,
+    role: 'status',
+    title: r => r.waitingForAnswer
+  },
+  // Accent pulse — the LLM turn is actively running.
+  working: {
+    ariaLabel: r => r.sessionRunning,
+    className: `${DOT_BASE} bg-(--ui-accent) shadow-[0_0_0.625rem_color-mix(in_srgb,var(--ui-accent)_55%,transparent)] ${PING} before:bg-(--ui-accent) before:opacity-70`,
+    role: 'status'
+  },
+  // Pulsing gray — a terminal(background=true) process is alive while the LLM
+  // is idle. Gray (not accent) reads as "something chugging along". Brighter
+  // than muted-foreground so it's visible against the sidebar surface.
+  background: {
+    ariaLabel: r => r.backgroundRunning,
+    className: `${DOT_BASE} bg-muted-foreground/80 ${PING} before:bg-muted-foreground/80 before:opacity-60`,
+    role: 'status',
+    title: r => r.backgroundRunning
+  },
+  // Steady green — a background session's turn completed and the user hasn't
+  // opened it since. "Something new here, go look."
+  unread: {
+    ariaLabel: r => r.finishedUnread,
+    className: `${DOT_BASE} bg-emerald-500`,
+    role: 'status',
+    title: r => r.finishedUnread
+  },
+  idle: {
+    className: 'size-1 rounded-full bg-(--ui-text-quaternary) opacity-80'
+  }
+}
+
+function SidebarRowDot({ dotState, className }: { dotState: SessionDotState; className?: string }) {
+  const { t } = useI18n()
+  const r = t.sidebar.row
+  const variant = DOT_VARIANTS[dotState]
+
+  return (
+    <span
+      aria-label={variant.ariaLabel?.(r)}
+      className={cn(variant.className, className)}
+      role={variant.role}
+      title={variant.title?.(r)}
+    />
   )
 }

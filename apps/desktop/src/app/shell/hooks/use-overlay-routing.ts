@@ -47,10 +47,6 @@ export function useOverlayRouting() {
     [navigate]
   )
 
-  const resetOverlayReturnRoute = useCallback(() => {
-    returnPathRef.current = NEW_CHAT_ROUTE
-  }, [])
-
   const closeOverlayToPreviousRoute = useCallback(
     () => navigate(returnPathRef.current || NEW_CHAT_ROUTE, { replace: true }),
     [navigate]
@@ -79,7 +75,6 @@ export function useOverlayRouting() {
     openCommandCenterSection,
     openStarmap,
     profilesOpen,
-    resetOverlayReturnRoute,
     settingsOpen,
     starmapOpen,
     toggleCommandCenter

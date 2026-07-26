@@ -152,24 +152,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MARKDOWN_HINT_RE = re.compile(
-    # Pipe table: any header line + separator line both starting with '|'.
-    r"(^\|.*\|\s*\n\|[-:|\s]+\|)"
-    # Headings, lists, code, bold/italic/strike/underline, links, blockquotes.
-    r"|(^#{1,6}\s)"
-    r"|(^\s*[-*]\s)"
-    r"|(^\s*\d+\.\s)"
-    r"|(^\s*---+\s*$)"
-    r"|(```)"
-    r"|(`[^`\n]+`)"
-    r"|(\*\*[^*\n].+?\*\*)"
-    r"|(~~[^~\n].+?~~)"
-    r"|(<u>.+?</u>)"
-    r"|(\*[^*\n]+\*)"
-    r"|(\[[^\]]+\]\([^)]+\))"
-    r"|(^>\s)",
+    r"(^#{1,6}\s)|(^\s*[-*]\s)|(^\s*\d+\.\s)|(^\s*---+\s*$)|(```)|(`[^`\n]+`)|(\*\*[^*\n].+?\*\*)|(~~[^~\n].+?~~)|(<u>.+?</u>)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)]+\))|(^>\s)",
     re.MULTILINE,
 )
-# Backwards-compatible alias retained because external callers reference it.
+# Detect markdown tables: a line starting with | followed by a separator line.
+# Feishu post-type 'md' elements do not render tables, so we force text mode.
 _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
@@ -588,12 +575,14 @@ def _build_markdown_post_payload(content: str) -> str:
 
 
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
-    """Build Feishu post rows while isolating fenced code blocks.
+    """Build Feishu post rows with native code_block elements for fenced blocks.
 
-    Feishu's `md` renderer can swallow trailing content when a fenced code block
-    appears inside one large markdown element. Split the reply at real fence
-    lines so prose before/after the code block remains visible while code stays
-    in a dedicated row.
+    Feishu's `md` renderer cannot render fenced code blocks — the triple
+    backtick markers appear as literal text and swallow trailing content when
+    a code block sits inside a single large md element.  This function splits
+    the reply at real fence lines and emits `code_block` elements (with the
+    language tag) for code content, keeping prose before/after in `md`
+    elements so both render correctly.
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
@@ -603,14 +592,22 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     rows: List[List[Dict[str, str]]] = []
     current: List[str] = []
     in_code_block = False
+    code_block_language: str = ""
+    _pending_code_block = False  # True when current holds code content to flush as code_block
 
     def _flush_current() -> None:
-        nonlocal current
+        nonlocal current, code_block_language, _pending_code_block
         if not current:
             return
         segment = "\n".join(current)
         if segment.strip():
-            rows.append([{"tag": "md", "text": segment}])
+            if _pending_code_block:
+                code_text = segment.lstrip("\n")
+                rows.append([{"tag": "code_block", "language": code_block_language, "text": code_text}])
+                _pending_code_block = False
+            else:
+                rows.append([{"tag": "md", "text": segment}])
+            code_block_language = ""
         current = []
 
     for raw_line in content.splitlines():
@@ -624,14 +621,18 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
         if is_fence:
             if not in_code_block:
                 _flush_current()
-            current.append(raw_line)
-            in_code_block = not in_code_block
-            if not in_code_block:
+                m = _MARKDOWN_FENCE_OPEN_RE.match(stripped_line)
+                code_block_language = (m.group(1) or "").strip() if m else ""
+                in_code_block = True
+            else:
+                _pending_code_block = True
+                in_code_block = False
                 _flush_current()
             continue
 
         current.append(raw_line)
 
+    # Content after the last code block (or unclosed fence — render as md)
     _flush_current()
     return rows or [[{"tag": "md", "text": content}]]
 
@@ -1436,8 +1437,7 @@ def check_feishu_requirements() -> bool:
 class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
-    supports_code_blocks = True  # Feishu renders fenced code blocks
-    splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
+    supports_code_blocks = False  # Feishu post md elements don't support code fences; forces fallback to PLAIN_TEXT
 
     MAX_MESSAGE_LENGTH = 8000
     # Max distinct chat IDs retained in _chat_locks before LRU eviction kicks in.
@@ -1910,21 +1910,11 @@ class FeishuAdapter(BasePlatformAdapter):
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-        # When chunking splits a long markdown response, an individual chunk
-        # can end up as plain prose that doesn't match the per-chunk hint
-        # regex — so it would be sent as ``msg_type=text`` and the user would
-        # see literal ``**bold``/``## heading``/code fences in the Feishu
-        # client while other chunks render correctly. Lock the markdown
-        # decision at the whole-message level so every chunk consistently
-        # uses ``post``. See #26841.
-        prefer_post = bool(_MARKDOWN_HINT_RE.search(formatted))
         last_response = None
 
         try:
             for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(
-                    chunk, prefer_post=prefer_post,
-                )
+                msg_type, payload = self._build_outbound_payload(chunk)
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -2004,7 +1994,6 @@ class FeishuAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         allow_permanent: bool = True,
-        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """Send an interactive card with approval buttons.
@@ -2029,7 +2018,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 }
 
             actions = [_btn("✅ Allow Once", "approve_once", "primary")]
-            if not smart_denied and allow_session:
+            if not smart_denied:
                 actions.append(_btn("✅ Session", "approve_session"))
                 if allow_permanent:
                     actions.append(_btn("✅ Always", "approve_always"))
@@ -2873,22 +2862,6 @@ class FeishuAdapter(BasePlatformAdapter):
                 "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, state["session_key"], choice, user_name,
             )
-            if not count and choice != "deny":
-                # The card was already updated synchronously to "Approved" by
-                # the callback response, but nothing was waiting — the wait
-                # already timed out (fail-closed deny) or was resolved via
-                # /approve. Correct the record so the user doesn't believe
-                # the command ran.
-                _chat = str(state.get("chat_id", "") or chat_id or "")
-                if _chat:
-                    try:
-                        await self.send(
-                            _chat,
-                            "⌛ That approval had already expired — the command "
-                            "was not run (it timed out or was resolved elsewhere).",
-                        )
-                    except Exception:
-                        logger.debug("[Feishu] expired-approval notice failed", exc_info=True)
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
 
@@ -4572,21 +4545,14 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound payload construction and send pipeline
     # =========================================================================
 
-    def _build_outbound_payload(
-        self, content: str, *, prefer_post: bool = False,
-    ) -> tuple[str, str]:
-        # Empirically (issue #52786), current Feishu clients render markdown
-        # tables inside ``post``-type ``md`` elements natively. The previous
-        # table-downgrade branch forced any table-containing message to
-        # ``text``, which left Feishu readers seeing the raw pipe-and-dash
-        # source instead of a rendered table. Trust the common markdown path
-        # for table content too.
-        #
-        # ``prefer_post`` lets ``send`` treat the chunk as part of a larger
-        # markdown document: when a long markdown reply is split at
-        # MAX_MESSAGE_LENGTH, the per-chunk regex would otherwise
-        # mis-classify a plain-prose chunk as ``text``. See #26841.
-        if prefer_post or _MARKDOWN_HINT_RE.search(content):
+    def _build_outbound_payload(self, content: str) -> tuple[str, str]:
+        # Feishu post-type 'md' elements do not render markdown tables; sending
+        # table content as post causes the message to appear blank on the client.
+        # Force plain text for anything that looks like a markdown table.
+        if _MARKDOWN_TABLE_RE.search(content):
+            text_payload = {"text": content}
+            return "text", json.dumps(text_payload, ensure_ascii=False)
+        if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
@@ -5465,7 +5431,7 @@ async def _standalone_send(
     (images, video, voice, documents). Replaces the legacy _send_feishu helper.
     """
     if not FEISHU_AVAILABLE:
-        return {"error": "Feishu dependencies not installed. Run `hermes setup` to install Feishu support."}
+        return {"error": "Feishu dependencies not installed. Run: pip install 'hermes-agent[feishu]'"}
 
     media_files = media_files or []
     try:
@@ -5713,7 +5679,7 @@ def register(ctx) -> None:
         is_connected=_is_connected,
         validate_config=_is_connected,
         required_env=["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
-        install_hint="Run `hermes setup` to install Feishu support.",
+        install_hint="pip install 'hermes-agent[feishu]'",
         setup_fn=interactive_setup,
         apply_yaml_config_fn=_apply_yaml_config,
         allowed_users_env="FEISHU_ALLOWED_USERS",

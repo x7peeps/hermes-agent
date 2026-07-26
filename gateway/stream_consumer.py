@@ -20,7 +20,6 @@ import inspect
 import logging
 import queue
 import re
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -50,15 +49,6 @@ _NEW_SEGMENT = object()
 # Queue marker for a completed assistant commentary message emitted between
 # API/tool iterations (for example: "I'll inspect the repo first.").
 _COMMENTARY = object()
-
-# Queue marker for a synchronous flush barrier.  Enqueued as
-# ``(_FLUSH, threading.Event)``; the drain loop finalizes and delivers any
-# buffered segment, then sets the event.  A caller on the agent worker thread
-# uses this (via ``flush_pending_sync``) to block until everything queued
-# BEFORE the marker has actually landed on the platform — needed before
-# sending a blocking interactive prompt (clarify poll) so the prompt is the
-# last thing on screen, not racing ahead of buffered prose.
-_FLUSH = object()
 
 
 @dataclass
@@ -199,13 +189,6 @@ class GatewayStreamConsumer:
         # subsequently failed.
         self._final_content_delivered = False
         self._delivered_commentary_texts: list[str] = []
-        # Retains the finalized visible text of each streaming segment so
-        # ``has_delivered_text`` can still match after ``_reset_segment_state``
-        # clears ``_last_sent_text``. Without this, a segment break (triggered
-        # by ``on_segment_break`` or ``on_commentary``) erases the only record
-        # of what was delivered, and the gateway's final-send suppression
-        # can't recognize an already-delivered response. (#65919 review)
-        self._delivered_segment_texts: list[str] = []
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -257,8 +240,6 @@ class GatewayStreamConsumer:
         final-message delivery.
         """
         meta = dict(self.metadata) if self.metadata else {}
-        if self._initial_reply_to_id:
-            meta["reply_to_message_id"] = self._initial_reply_to_id
         if expect_edits:
             meta["expect_edits"] = True
         if final:
@@ -337,10 +318,7 @@ class GatewayStreamConsumer:
         visible_prefix = self._visible_prefix().strip()
         if visible_prefix == target:
             return True
-        return any(
-            sent.strip() == target
-            for sent in (*self._delivered_commentary_texts, *self._delivered_segment_texts)
-        )
+        return any(sent.strip() == target for sent in self._delivered_commentary_texts)
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
@@ -350,29 +328,6 @@ class GatewayStreamConsumer:
         """Queue a completed interim assistant commentary message."""
         if text:
             self._queue.put((_COMMENTARY, text))
-
-    def flush_pending_sync(self, timeout: float = 5.0) -> bool:
-        """Block the calling (agent worker) thread until everything queued
-        before this point has been finalized and delivered to the platform.
-
-        Enqueues a ``(_FLUSH, Event)`` barrier behind any pending deltas /
-        commentary / segment breaks.  The async ``run()`` task processes those
-        first (FIFO), then handles the barrier — finalizing the current segment
-        and setting the event.  Returns True if the flush completed within
-        ``timeout``, False on timeout (so the caller continues rather than
-        hanging if the consumer task is not running / already finished).
-
-        This is the ordering barrier used before sending a blocking interactive
-        prompt (clarify poll): without it, the poll — sent on a separate,
-        agent-thread-blocking path — races ahead of buffered prose that is still
-        sitting in this queue, so the question lands ABOVE its own explanation.
-        """
-        evt = threading.Event()
-        try:
-            self._queue.put((_FLUSH, evt))
-        except Exception:
-            return False
-        return evt.wait(timeout=max(0.0, float(timeout)))
 
     def _notify_new_message(self) -> None:
         """Fire the on_new_message callback, swallowing any errors."""
@@ -384,33 +339,9 @@ class GatewayStreamConsumer:
         except Exception:
             logger.debug("on_new_message callback error", exc_info=True)
 
-    @staticmethod
-    def _signal_flush(flush_event) -> None:
-        """Wake a thread blocked in flush_pending_sync(), swallowing errors.
-
-        Centralised so every loop exit path that consumed a ``_FLUSH`` barrier
-        (the normal bottom-of-iteration path AND early ``continue`` paths such
-        as the oversized-prose overflow split) reliably sets the event. Missing
-        a set is not a deadlock — the caller uses a bounded timeout — but it
-        would make the caller stall the full timeout before its blocking send.
-        """
-        if flush_event is None:
-            return
-        try:
-            flush_event.set()
-        except Exception:
-            pass
-
     def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
-        # Retain the finalized visible text of the current segment before
-        # clearing ``_last_sent_text``, so ``has_delivered_text`` can still
-        # match it after a segment break. (#65919 review)
-        if self._last_sent_text:
-            finalized = self._clean_for_display(self._last_sent_text).strip()
-            if finalized:
-                self._delivered_segment_texts.append(finalized)
         self._message_id = None
         self._message_created_ts = None
         self._accumulated = ""
@@ -649,8 +580,6 @@ class GatewayStreamConsumer:
                 # Drain all available items from the queue
                 got_done = False
                 got_segment_break = False
-                got_flush = False
-                flush_event = None
                 commentary_text = None
                 while True:
                     try:
@@ -663,14 +592,6 @@ class GatewayStreamConsumer:
                             break
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
-                            break
-                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _FLUSH:
-                            # Flush barrier: finalize the current segment like a
-                            # tool boundary, then signal the waiting thread once
-                            # delivery for this iteration has completed (below).
-                            got_flush = True
-                            got_segment_break = True
-                            flush_event = item[1]
                             break
                         self._filter_and_accumulate(item)
                     except queue.Empty:
@@ -777,15 +698,8 @@ class GatewayStreamConsumer:
                             self._message_id = None
                             self._fallback_final_send = False
                             self._fallback_prefix = ""
-
-                        # This iteration consumed a _FLUSH barrier and delivered
-                        # the buffered prose via the chunk loop above, then takes
-                        # an early `continue` that skips the bottom-of-loop set.
-                        # Signal here so flush_pending_sync() doesn't stall the
-                        # full timeout waiting on already-delivered content.
-                        if got_flush:
-                            self._signal_flush(flush_event)
                         continue
+
                     # Existing message: edit it with the first chunk, then
                     # start a new message for the overflow remainder.
                     while (
@@ -942,13 +856,6 @@ class GatewayStreamConsumer:
                         await self._flush_segment_tail_on_edit_failure()
                     self._reset_segment_state(preserve_no_edit=True)
 
-                # Flush barrier satisfied: the buffered segment (if any) has now
-                # been finalized and delivered above, so wake the thread blocked
-                # in flush_pending_sync().  Done last so the waiter only unblocks
-                # once everything queued before the barrier is on screen.
-                if got_flush:
-                    self._signal_flush(flush_event)
-
                 await asyncio.sleep(0.05)  # Small yield to not busy-loop
 
         except asyncio.CancelledError:
@@ -981,26 +888,6 @@ class GatewayStreamConsumer:
                 self._final_content_delivered = True
         except Exception as e:
             logger.error("Stream consumer error: %s", e)
-        finally:
-            # Safety net: if run() exits (normal return, cancellation, or
-            # exception) while a _FLUSH barrier is still queued or was consumed
-            # but not yet signaled, wake any waiters now. Without this a caller
-            # blocked in flush_pending_sync() would stall the full timeout when
-            # the consumer dies mid-flush. Bounded either way, but this makes
-            # the common case instant instead of timeout-delayed.
-            try:
-                while True:
-                    item = self._queue.get_nowait()
-                    if (
-                        isinstance(item, tuple)
-                        and len(item) == 2
-                        and item[0] is _FLUSH
-                    ):
-                        self._signal_flush(item[1])
-            except queue.Empty:
-                pass
-            except Exception:
-                pass
 
     # Strip MEDIA:<path> tags before display. Uses the shared anchored
     # MEDIA_TAG_CLEANUP_RE from gateway/platforms/base.py — only tags whose

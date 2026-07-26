@@ -5,8 +5,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { sessionTitle } from '@/lib/chat-runtime'
 import { cn } from '@/lib/utils'
-import { $unreadFinishedSessionIds } from '@/store/session'
-import { $attentionSessionIds, $workingSessionIds } from '@/store/session-states'
+import { $attentionSessionIds, $unreadFinishedSessionIds, $workingSessionIds } from '@/store/session'
 import { $switcherIndex, $switcherOpen, $switcherSessions, closeSwitcher } from '@/store/session-switcher'
 
 import { HUD_ITEM, HUD_POSITION, HUD_SURFACE, HUD_TEXT } from './floating-hud'

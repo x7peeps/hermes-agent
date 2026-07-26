@@ -11,10 +11,9 @@ import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
-import { $compactionActive } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
-import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
+import { removeQueuedPrompt } from '@/store/composer-queue'
 import { toggleReview } from '@/store/review'
 import { $gatewayState } from '@/store/session'
 import { $threadScrolledUp } from '@/store/thread-scroll'
@@ -105,7 +104,6 @@ export function ChatBar({
   // focus-bus key, and awaiting-input edge. Main scope = the legacy globals.
   const scope = useComposerScope()
   const attachments = useStore(scope.attachments.$attachments)
-  const compacting = useStore($compactionActive)
   const scrolledUp = useStore($threadScrolledUp)
   const autoSpeak = useStore($autoSpeakReplies)
   // The turn is parked on the user (clarify / approval / sudo / secret). Esc must
@@ -191,7 +189,6 @@ export function ChatBar({
     exitQueuedEdit,
     queueCurrentDraft,
     queueEdit,
-    queueParked,
     queuedPrompts,
     sendQueuedNow,
     stepQueuedEdit
@@ -212,44 +209,23 @@ export function ChatBar({
 
   const statusStackVisible = queuedPrompts.length > 0 || statusPresent
 
-  // Halt vs. reach-the-queue: every interrupt lands on onCancel, but only the
-  // gestures that MEAN "stop working" (Stop button, Esc) go through this
-  // wrapper, which parks the queue first — an explicit halt must not roll
-  // straight into the next queued prompt (that read as Stop not working; the
-  // queued text also seemed to vanish, since the collapsed panel row was its
-  // only trace). Interrupts that exist to advance the queue (send-now-while-
-  // busy) call the raw onCancel and keep draining on settle. Parked entries
-  // stay in the panel until resumed, sent, edited, or deleted.
-  const haltRun = useCallback(() => {
-    parkQueuedPrompts(activeQueueSessionKeyRef.current)
-
-    return onCancel()
-  }, [activeQueueSessionKeyRef, onCancel])
-
   const { compactPill, stacked } = useComposerMetrics({ composerRef, composerSurfaceRef, editorRef, poppedOut })
   const hasComposerPayload = hasText || attachments.length > 0
   const canSubmit = busy || hasComposerPayload
+  const busyAction = busy && hasComposerPayload ? 'queue' : 'stop'
 
   // Steer only makes sense mid-turn, text-only (the gateway can't carry images
   // into a tool result) and never for a slash command (those execute inline).
-  const canSteer = busy && !compacting && !!onSteer && attachments.length === 0 && isSteerableText
-
-  // While busy: text redirects the live turn (Cursor-style stop-and-correct),
-  // attachments queue for the next turn, an empty composer stops.
-  const busyAction: 'steer' | 'queue' | 'stop' = canSteer
-    ? 'steer'
-    : compacting || hasComposerPayload
-      ? 'queue'
-      : 'stop'
+  const canSteer = busy && !!onSteer && attachments.length === 0 && isSteerableText
 
   // The submit engine — the orchestration seam where draft + queue meet. Owns
   // the submit decision tree, the send-with-restore primitive, and steer.
-  const { queueDraft, steerDraft, submitDraft } = useComposerSubmit({
+  const { steerDraft, submitDraft } = useComposerSubmit({
     activeQueueSessionKey,
     activeQueueSessionKeyRef,
     attachments,
     busy,
-    compacting,
+    canSteer,
     clearDraft,
     disabled,
     draftRef,
@@ -259,9 +235,7 @@ export function ChatBar({
     focusInput,
     inputDisabled,
     loadIntoComposer,
-    // The submit engine's only cancel call is the Stop-button branch (busy +
-    // empty composer) — an explicit halt, so it parks the queue.
-    onCancel: haltRun,
+    onCancel,
     onSteer,
     onSubmit,
     queueCurrentDraft,
@@ -587,22 +561,14 @@ export function ChatBar({
       return
     }
 
-    // Cmd/Ctrl+Enter queues a follow-up while a turn runs. Plain Enter steers
-    // a text-only draft, so both live-turn actions stay reachable by keyboard.
+    // Cmd/Ctrl+Enter is reserved for steering the live run — never a send.
+    // Steer when there's a steerable draft, otherwise swallow it so it can't
+    // surprise-send. (Plain Enter still queues while busy / sends when idle.)
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.shiftKey) {
       event.preventDefault()
 
-      if (busy && !disabled) {
-        // As with plain Enter, source the just-typed content from the DOM so a
-        // fast keypress cannot queue a stale draft.
-        const editorText = editorRef.current ? composerPlainText(editorRef.current) : draftRef.current
-
-        if (editorText !== draftRef.current) {
-          draftRef.current = editorText
-          setComposerText(editorText)
-        }
-
-        queueDraft()
+      if (canSteer) {
+        steerDraft()
       }
 
       return
@@ -655,11 +621,11 @@ export function ChatBar({
 
       // Otherwise Esc interrupts the running turn (Stop-button parity) — unless
       // the turn is parked waiting on the user, where Esc must not discard the
-      // pending prompt. An explicit halt, so it parks the queue too.
+      // pending prompt.
       if (busy && !awaitingInput) {
         event.preventDefault()
         triggerHaptic('cancel')
-        void Promise.resolve(haltRun())
+        void Promise.resolve(onCancel())
       }
     }
   }
@@ -696,8 +662,7 @@ export function ChatBar({
     useComposerBranch({ clearDraft, cwd, draftRef })
 
   // Global Esc-to-cancel when the chat (not the composer input) has focus.
-  // Same explicit-halt semantics as the Stop button: park the queue.
-  useComposerEscCancel({ awaitingInput, busy, onCancel: haltRun, target: scope.target })
+  useComposerEscCancel({ awaitingInput, busy, onCancel, target: scope.target })
 
   const {
     conversation,
@@ -738,6 +703,7 @@ export function ChatBar({
       autoSpeak={autoSpeak}
       busy={busy}
       busyAction={busyAction}
+      canSteer={canSteer}
       canSubmit={canSubmit}
       compactModelPill={poppedOut || compactPill}
       conversation={{
@@ -753,7 +719,7 @@ export function ChatBar({
       disabled={disabled}
       hasComposerPayload={hasComposerPayload}
       onDictate={dictate}
-      onQueue={queueDraft}
+      onSteer={steerDraft}
       onToggleAutoSpeak={handleToggleAutoSpeak}
       state={state}
       voiceStatus={voiceStatus}
@@ -768,7 +734,7 @@ export function ChatBar({
         autoCapitalize="off"
         autoCorrect="off"
         className={cn(
-          'min-h-[1.625rem] min-h-(--composer-input-min-height) max-h-(--composer-input-max-height) cursor-text overflow-y-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] bg-transparent pb-1 pr-1 pt-1 leading-normal text-foreground outline-none disabled:cursor-not-allowed',
+          'min-h-(--composer-input-min-height) max-h-(--composer-input-max-height) cursor-text overflow-y-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] bg-transparent pb-1 pr-1 pt-1 leading-normal text-foreground outline-none disabled:cursor-not-allowed',
           'empty:before:content-[attr(data-placeholder)] empty:before:text-muted-foreground/60',
           '**:data-ref-text:cursor-default',
           stacked && 'pl-3',
@@ -928,17 +894,7 @@ export function ChatBar({
                     }
                   }}
                   onEdit={beginQueuedEdit}
-                  onResume={() => {
-                    unparkQueuedPrompts(activeQueueSessionKey)
-
-                    // Idle → kick the head immediately; busy → the settle drain
-                    // takes over now that the park is lifted.
-                    if (!busy) {
-                      void drainNextQueued()
-                    }
-                  }}
                   onSendNow={id => void sendQueuedNow(id)}
-                  parked={queueParked}
                 />
               ) : null
             }

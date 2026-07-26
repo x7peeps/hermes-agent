@@ -131,7 +131,7 @@ _USER_SKIPPED_SENTINEL = "__hermes_user_skipped__"
 # ---------------------------------------------------------------------------
 
 
-def _get_token_dir(hermes_home: str | Path | None = None) -> Path:
+def _get_token_dir() -> Path:
     """Return the directory for MCP OAuth token files.
 
     Uses HERMES_HOME so each profile gets its own OAuth tokens.
@@ -139,7 +139,7 @@ def _get_token_dir(hermes_home: str | Path | None = None) -> Path:
     """
     try:
         from hermes_constants import get_hermes_home
-        base = Path(hermes_home) if hermes_home is not None else Path(get_hermes_home())
+        base = Path(get_hermes_home())
     except ImportError:
         base = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
     return base / "mcp-tokens"
@@ -226,24 +226,6 @@ def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
             and parsed.port is not None
         ):
             return int(parsed.port)
-    return None
-
-
-def _cached_redirect_uri(storage: "HermesTokenStorage | None") -> str | None:
-    """Return a cached non-loopback redirect URI, if one was registered."""
-    if storage is None:
-        return None
-    try:
-        data = _read_json(storage._client_info_path())
-    except (AttributeError, TypeError, ValueError):
-        return None
-    for uri in (data or {}).get("redirect_uris") or []:
-        try:
-            parsed = urlparse(str(uri))
-        except (TypeError, ValueError):
-            continue
-        if parsed.scheme == "https" and parsed.netloc:
-            return str(uri)
     return None
 
 
@@ -388,18 +370,17 @@ class HermesTokenStorage:
         HERMES_HOME/mcp-tokens/<server_name>.meta.json     -- oauth server metadata
     """
 
-    def __init__(self, server_name: str, *, hermes_home: str | Path | None = None):
+    def __init__(self, server_name: str):
         self._server_name = _safe_filename(server_name)
-        self._hermes_home = Path(hermes_home) if hermes_home is not None else None
 
     def _tokens_path(self) -> Path:
-        return _get_token_dir(self._hermes_home) / f"{self._server_name}.json"
+        return _get_token_dir() / f"{self._server_name}.json"
 
     def _client_info_path(self) -> Path:
-        return _get_token_dir(self._hermes_home) / f"{self._server_name}.client.json"
+        return _get_token_dir() / f"{self._server_name}.client.json"
 
     def _meta_path(self) -> Path:
-        return _get_token_dir(self._hermes_home) / f"{self._server_name}.meta.json"
+        return _get_token_dir() / f"{self._server_name}.meta.json"
 
     # -- tokens ------------------------------------------------------------
 
@@ -522,21 +503,12 @@ class HermesTokenStorage:
                 pass
         return snap
 
-    def restore(self, snapshot: dict[str, bytes], *, only_if_absent: bool = False) -> None:
-        """Revert to a snapshot without overwriting a concurrent successful write."""
-        if only_if_absent and any(
-            path.exists()
-            for path in (self._tokens_path(), self._client_info_path(), self._meta_path())
-        ):
-            logger.info(
-                "Skipping OAuth rollback for %s because newer state exists",
-                self._server_name,
-            )
-            return
+    def restore(self, snapshot: dict[str, bytes]) -> None:
+        """Revert to a ``snapshot()`` capture (dropping any newer partial state)."""
         self.remove()
         if not snapshot:
             return
-        token_dir = _get_token_dir(self._hermes_home)
+        token_dir = _get_token_dir()
         token_dir.mkdir(parents=True, exist_ok=True)
         for fname, data in snapshot.items():
             path = token_dir / fname
@@ -658,13 +630,6 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
         Opens the browser automatically when possible; always prints the URL
         as a fallback for headless/SSH/gateway environments.
         """
-        from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
-        dashboard_flow = get_dashboard_oauth_flow()
-        if dashboard_flow is not None:
-            await dashboard_flow.publish_authorization_url(authorization_url)
-            return
-
         # Fail fast at the authorization boundary in non-interactive contexts
         # (systemd gateway, cron, background MCP discovery). A cached-but-unusable
         # token (expired/revoked, refresh rejected) makes the SDK fall through to
@@ -778,12 +743,6 @@ def _make_callback_waiter(port: int):
     """
 
     async def _wait() -> tuple[str, str | None]:
-        from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
-        dashboard_flow = get_dashboard_oauth_flow()
-        if dashboard_flow is not None:
-            return await dashboard_flow.wait_for_callback()
-
         # Reject before binding the callback listener in non-interactive
         # contexts. Reaching here means the SDK entered the authorization-code
         # flow (a valid or refreshable token would never call the callback
@@ -975,13 +934,9 @@ def _paste_callback_reader(result: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def remove_oauth_tokens(
-    server_name: str,
-    *,
-    hermes_home: str | Path | None = None,
-) -> None:
+def remove_oauth_tokens(server_name: str) -> None:
     """Delete stored OAuth tokens and client info for a server."""
-    storage = HermesTokenStorage(server_name, hermes_home=hermes_home)
+    storage = HermesTokenStorage(server_name)
     storage.remove()
     logger.info("OAuth tokens removed for '%s'", server_name)
 
@@ -1017,18 +972,6 @@ def _configure_callback_port(
     consolidation PR.
     """
     global _oauth_port
-    from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
-
-    dashboard_flow = get_dashboard_oauth_flow()
-    if dashboard_flow is not None:
-        cfg["_resolved_port"] = 0
-        cfg["redirect_uri"] = cfg.get("redirect_uri") or dashboard_flow.redirect_uri
-        return 0
-    cached_redirect_uri = _cached_redirect_uri(storage)
-    if not cfg.get("redirect_uri") and cached_redirect_uri:
-        cfg["redirect_uri"] = cached_redirect_uri
-        cfg["_resolved_port"] = 0
-        return 0
     requested = int(cfg.get("redirect_port", 0))
     # Precedence: explicit config port → cached client-registration port →
     # fresh ephemeral port. The cached port keeps re-auth consistent with the

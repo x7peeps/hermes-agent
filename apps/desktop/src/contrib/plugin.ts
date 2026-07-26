@@ -13,7 +13,6 @@
  */
 
 import { pluginRest, type PluginRestOptions, pluginSocket } from '@/hermes'
-import { createPluginI18n, type PluginI18n } from '@/i18n'
 import { readKey, writeKey } from '@/lib/storage'
 
 import { registry } from './registry'
@@ -52,9 +51,6 @@ export interface PluginContext {
   socket: (path: string, onMessage: (data: unknown) => void) => () => void
   /** Plugin-scoped persistence. */
   storage: PluginStorage
-  /** Plugin-scoped i18n: ship + register locale bundles under this plugin,
-   *  resolved against the app's active locale — no core `en.ts` edit. */
-  i18n: PluginI18n
 }
 
 export interface HermesPlugin {
@@ -110,7 +106,6 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     registerMany: cs => track(registry.registerMany(cs.map(scope))),
     rest: <T>(path: string, opts?: PluginRestOptions) => pluginRest<T>(pluginId, path, opts),
     socket: (path, onMessage) => track(pluginSocket(pluginId, path, onMessage)),
-    storage: createPluginStorage(pluginId),
-    i18n: createPluginI18n(pluginId, track)
+    storage: createPluginStorage(pluginId)
   }
 }

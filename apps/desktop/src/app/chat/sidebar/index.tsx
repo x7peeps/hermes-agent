@@ -21,7 +21,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem
 } from '@/components/ui/sidebar'
-import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+import { TipKeybindLabel } from '@/components/ui/tooltip'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -93,10 +93,11 @@ import {
   $sessions,
   $sessionsLoading,
   $sessionsTotal,
+  $workingSessionIds,
   sessionPinId,
   setCurrentCwd
 } from '@/store/session'
-import { $focusedStoredSessionId, $workingSessionIds, type SplitDir } from '@/store/session-states'
+import { $focusedStoredSessionId, type SplitDir } from '@/store/session-states'
 
 import {
   type AppView,
@@ -340,6 +341,45 @@ export function ChatSidebar({
   const [messagingVisible, setMessagingVisible] = useState<Record<string, number>>({})
   const searchInputRef = useRef<HTMLInputElement>(null)
   const trimmedQuery = searchQuery.trim()
+
+  // ── Multi-select for batch archive ────────────────────────────────────────
+  const [selectedMultiSessionIds, setSelectedMultiSessionIds] = useState<Set<string>>(new Set())
+
+  const onToggleMultiSelect = useCallback((sessionId: string) => {
+    setSelectedMultiSessionIds(prev => {
+      const next = new Set(prev)
+      if (next.has(sessionId)) {
+        next.delete(sessionId)
+      } else {
+        next.add(sessionId)
+      }
+      return next
+    })
+  }, [])
+
+  const onClearMultiSelect = useCallback(() => setSelectedMultiSessionIds(new Set()), [])
+
+  const onArchiveSelected = useCallback(() => {
+    const ids = [...selectedMultiSessionIds]
+    onClearMultiSelect()
+    // Batch-archive sequentially; each call optimistically removes its row,
+    // so later iterations skip already-archived entries.
+    for (const id of ids) {
+      onArchiveSession(id)
+    }
+  }, [selectedMultiSessionIds, onArchiveSession, onClearMultiSelect])
+
+  // Clear multi-select on Escape.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedMultiSessionIds.size > 0) {
+        onClearMultiSelect()
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedMultiSessionIds, onClearMultiSelect])
 
   // Hotkey (session.focusSearch) → focus the field once it's mounted.
   useEffect(() => {
@@ -716,7 +756,7 @@ export function ChatSidebar({
   // session settles (its turn finished) or the window refocuses (an external
   // terminal may have changed things) — only while a project is entered, and
   // only the cheap per-repo `git worktree list`, never the heavy tree scan.
-  const prevWorkingIdsRef = useRef<readonly string[]>(workingSessionIds)
+  const prevWorkingIdsRef = useRef<string[]>(workingSessionIds)
 
   useEffect(() => {
     const prev = prevWorkingIdsRef.current
@@ -1231,7 +1271,6 @@ export function ChatSidebar({
                 pinned={false}
                 rootClassName="min-h-32 flex-1 overflow-hidden p-0"
                 sessions={searchResults}
-                showProfileTags={showAllProfiles}
                 workingSessionIdSet={workingSessionIdSet}
               />
             )}
@@ -1254,7 +1293,6 @@ export function ChatSidebar({
                 pinned
                 rootClassName="shrink-0 p-0 pb-1"
                 sessions={pinnedSessions}
-                showProfileTags={showAllProfiles}
                 sortable={pinnedSessions.length > 1}
                 workingSessionIdSet={workingSessionIdSet}
               />
@@ -1315,65 +1353,59 @@ export function ChatSidebar({
                         scoped
                       />
                       <div className="grid size-6 place-items-center">
-                        <Tip label={s.showProjects}>
-                          <Button
-                            aria-label={s.showProjects}
-                            className={HEADER_NAV_BTN}
-                            onClick={event => {
-                              event.stopPropagation()
-                              exitProjectScope()
-                            }}
-                            size="icon-xs"
-                            variant="ghost"
-                          >
-                            <Codicon name="list-unordered" size="0.75rem" />
-                          </Button>
-                        </Tip>
+                        <Button
+                          aria-label={s.showProjects}
+                          className={HEADER_NAV_BTN}
+                          onClick={event => {
+                            event.stopPropagation()
+                            exitProjectScope()
+                          }}
+                          size="icon-xs"
+                          variant="ghost"
+                        >
+                          <Codicon name="list-unordered" size="0.75rem" />
+                        </Button>
                       </div>
                     </div>
                   ) : (
                     <div className="flex shrink-0 items-center gap-0.5">
                       {!showAllProfiles ? (
-                        <Tip label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}>
+                        <Button
+                          aria-label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}
+                          className={HEADER_ACTION_BTN}
+                          onClick={event => {
+                            event.stopPropagation()
+
+                            if (agentsGrouped) {
+                              openProjectCreate()
+                            } else {
+                              onNewSessionInWorkspace(null)
+                            }
+                          }}
+                          size="icon-xs"
+                          variant="ghost"
+                        >
+                          <Codicon name="add" size="0.75rem" />
+                        </Button>
+                      ) : null}
+                      <div className="grid size-6 place-items-center">
+                        {!showAllProfiles && agentSessions.length > 0 ? (
                           <Button
-                            aria-label={agentsGrouped ? s.projects.newButton : s.nav['new-session']}
-                            className={HEADER_ACTION_BTN}
+                            aria-label={agentsGrouped ? s.showSessions : s.showProjects}
+                            className={cn(
+                              HEADER_NAV_BTN,
+                              agentsGrouped && 'bg-(--ui-control-active-background) text-foreground opacity-100'
+                            )}
                             onClick={event => {
                               event.stopPropagation()
-
-                              if (agentsGrouped) {
-                                openProjectCreate()
-                              } else {
-                                onNewSessionInWorkspace(null)
-                              }
+                              setSidebarRecentsOpen(true)
+                              setSidebarAgentsGrouped(!agentsGrouped)
                             }}
                             size="icon-xs"
                             variant="ghost"
                           >
-                            <Codicon name="add" size="0.75rem" />
+                            <Codicon name={agentsGrouped ? 'list-unordered' : 'root-folder'} size="0.75rem" />
                           </Button>
-                        </Tip>
-                      ) : null}
-                      <div className="grid size-6 place-items-center">
-                        {!showAllProfiles && agentSessions.length > 0 ? (
-                          <Tip label={agentsGrouped ? s.showSessions : s.showProjects}>
-                            <Button
-                              aria-label={agentsGrouped ? s.showSessions : s.showProjects}
-                              className={cn(
-                                HEADER_NAV_BTN,
-                                agentsGrouped && 'bg-(--ui-control-active-background) text-foreground opacity-100'
-                              )}
-                              onClick={event => {
-                                event.stopPropagation()
-                                setSidebarRecentsOpen(true)
-                                setSidebarAgentsGrouped(!agentsGrouped)
-                              }}
-                              size="icon-xs"
-                              variant="ghost"
-                            >
-                              <Codicon name={agentsGrouped ? 'list-unordered' : 'root-folder'} size="0.75rem" />
-                            </Button>
-                          </Tip>
                         ) : null}
                       </div>
                     </div>
@@ -1400,6 +1432,10 @@ export function ChatSidebar({
                 onResumeSession={onResumeSession}
                 onToggle={() => setSidebarRecentsOpen(!agentsOpen)}
                 onTogglePin={pinSession}
+                onArchiveSelected={onArchiveSelected}
+                onClearMultiSelect={onClearMultiSelect}
+                onToggleMultiSelect={onToggleMultiSelect}
+                selectedMultiSessionIds={selectedMultiSessionIds}
                 open={agentsOpen}
                 pinned={false}
                 projectBackRow={

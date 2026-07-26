@@ -39,7 +39,7 @@ import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { recordPreviewArtifact } from '@/store/preview-status'
 import { $activeSessionId, $currentCwd } from '@/store/session'
-import { $toolInlineDiff } from '@/store/tool-diffs'
+import { $toolInlineDiffs } from '@/store/tool-diffs'
 import { $toolRowDismissed, dismissToolRow } from '@/store/tool-dismiss'
 import { $toolDisclosureOpen, $toolViewMode, setToolDisclosureOpen } from '@/store/tool-view'
 
@@ -103,39 +103,23 @@ interface ToolStatusCopy {
   statusRunning: string
 }
 
-function prettyTechnicalValue(value: unknown): string {
-  if (typeof value === 'string') {
-    const trimmed = value.trim()
+function rawTechnicalTrace(args: unknown, result: unknown): string {
+  const parts = [args, result]
+    .filter(value => value !== undefined && value !== null)
+    .map(value => {
+      if (typeof value === 'string') {
+        return value
+      }
 
-    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-      return value
-    }
+      try {
+        return JSON.stringify(value)
+      } catch {
+        return String(value)
+      }
+    })
+    .filter(Boolean)
 
-    try {
-      const parsed = JSON.parse(value)
-
-      return parsed && typeof parsed === 'object' ? JSON.stringify(parsed, null, 2) : value
-    } catch {
-      return value
-    }
-  }
-
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
-}
-
-export function technicalTrace(args: unknown, result: unknown): string {
-  const parts = [
-    ['Arguments', args],
-    ['Result', result]
-  ]
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([label, value]) => `${label}:\n${prettyTechnicalValue(value)}`)
-
-  return clampForDisplay(parts.join('\n\n'))
+  return clampForDisplay(parts.join('\n'))
 }
 
 function statusGlyph(status: ToolStatus, copy: ToolStatusCopy): ReactNode {
@@ -299,9 +283,8 @@ function ToolEntry({ part }: ToolEntryProps) {
   const disclosureId = `tool-entry:${messageId}:${toolPartDisclosureId(stablePart)}`
   const dismissed = useStore($toolRowDismissed(disclosureId))
   const isPending = messageRunning && result === undefined
-  // Subscribe to this tool's diff only, so a live patch for one tool doesn't
-  // re-render every mounted tool row (the factory caches a per-id atom).
-  const sideDiff = useStore($toolInlineDiff(toolCallId ?? ''))
+  const liveDiffs = useStore($toolInlineDiffs)
+  const sideDiff = toolCallId ? liveDiffs[toolCallId] || '' : ''
   const inlineDiff = stripInlineDiffChrome(sideDiff) || inlineDiffFromResult(result)
   const isFileEdit = isFileEditTool(toolName)
   const defaultOpen = Boolean(inlineDiff)
@@ -327,22 +310,17 @@ function ToolEntry({ part }: ToolEntryProps) {
   // in the composer status stack rather than a bulky inline card. Uses the same
   // detected target the old inline card did, keyed to the active session the
   // stack reads from. Idempotent + dedup'd, so re-renders don't churn.
+  const activeSessionId = useStore($activeSessionId)
+  const currentCwd = useStore($currentCwd)
   const previewTarget = view.previewTarget
 
   useEffect(() => {
-    if (isPending || !previewTarget || !isPreviewableTarget(previewTarget)) {
+    if (isPending || !activeSessionId || !previewTarget || !isPreviewableTarget(previewTarget)) {
       return
     }
 
-    // Read (don't subscribe) session/cwd: this only fires when a previewable
-    // target appears, and subscribing re-rendered every tool row on any session
-    // or cwd change.
-    const activeSessionId = $activeSessionId.get()
-
-    if (activeSessionId) {
-      recordPreviewArtifact(activeSessionId, previewTarget, $currentCwd.get() || '')
-    }
-  }, [isPending, previewTarget])
+    recordPreviewArtifact(activeSessionId, previewTarget, currentCwd || '')
+  }, [activeSessionId, currentCwd, isPending, previewTarget])
 
   const detailSections = useMemo(() => {
     if (!view.detail) {
@@ -369,18 +347,15 @@ function ToolEntry({ part }: ToolEntryProps) {
     return { body: rest.join('\n\n').trim(), summary }
   }, [view.detail, view.status, view.subtitle])
 
-  // `looksRedundant` normalizes the FULL (uncapped) detail payload — a
-  // read_file / terminal result can be huge. Memoize on the view fields so it
-  // recomputes only when the tool's content changes, not on every parent
-  // re-render (tool rows re-render on every stream tick of the running message).
-  const detailMatchesSubtitle = useMemo(() => looksRedundant(view.subtitle, view.detail), [view.subtitle, view.detail])
-  const detailMatchesTitle = useMemo(() => looksRedundant(view.title, view.detail), [view.title, view.detail])
+  const detailMatchesSubtitle = looksRedundant(view.subtitle, view.detail)
 
   const showDetail =
     !view.inlineDiff &&
-    (Boolean(view.stdout || view.stderr) ||
-      (view.status === 'error' && Boolean(detailSections.summary || detailSections.body)) ||
-      (view.status !== 'error' && Boolean(view.detail) && !detailMatchesTitle && !detailMatchesSubtitle))
+    ((view.status === 'error' && Boolean(detailSections.summary || detailSections.body)) ||
+      (view.status !== 'error' &&
+        Boolean(view.detail) &&
+        !looksRedundant(view.title, view.detail) &&
+        !detailMatchesSubtitle))
 
   const renderDetailAsCode =
     view.status !== 'error' &&
@@ -389,16 +364,14 @@ function ToolEntry({ part }: ToolEntryProps) {
   const hasSearchHits = Boolean(view.searchHits?.length)
   const searchResultsLabel = part.toolName === 'web_search' ? 'Search results' : view.detailLabel
 
+  const showRawSearchDrilldown =
+    part.toolName === 'web_search' &&
+    part.result !== undefined &&
+    toolViewMode !== 'technical' &&
+    Boolean(view.rawResult.trim())
+
   const hasExpandableContent = Boolean(
-    view.imageUrl ||
-    view.inlineDiff ||
-    showDetail ||
-    hasSearchHits ||
-    view.stdout ||
-    view.stderr ||
-    view.terminalCommand ||
-    view.terminalExitCode !== undefined ||
-    toolViewMode === 'technical'
+    view.imageUrl || view.inlineDiff || showDetail || hasSearchHits || toolViewMode === 'technical'
   )
 
   // copyAction reads the uncapped view.detail; clampForDisplay below only bounds
@@ -522,9 +495,6 @@ function ToolEntry({ part }: ToolEntryProps) {
               text={copyAction.text}
             />
           )}
-          {part.toolName === 'terminal' && toolViewMode !== 'technical' && (
-            <TerminalTranscript command={view.terminalCommand} exitCode={view.terminalExitCode} />
-          )}
           {view.imageUrl && (
             <div className="max-w-72 overflow-hidden rounded-[0.25rem] border border-(--ui-stroke-tertiary)">
               <ZoomableImage alt={copy.outputAlt} className="h-auto w-full object-cover" src={view.imageUrl} />
@@ -532,12 +502,6 @@ function ToolEntry({ part }: ToolEntryProps) {
           )}
           {hasSearchHits && view.searchHits && (
             <div className="max-w-full text-xs leading-relaxed text-(--ui-text-secondary)">
-              {view.searchQuery && (
-                <p className="mb-1 flex min-w-0 gap-1.5 wrap-anywhere">
-                  <span className="shrink-0 font-medium text-(--ui-text-tertiary)">Search</span>
-                  <span>{view.searchQuery}</span>
-                </p>
-              )}
               {searchResultsLabel && <p className={TOOL_SECTION_LABEL_CLASS}>{searchResultsLabel}</p>}
               <SearchResultsList hits={view.searchHits} />
             </div>
@@ -616,54 +580,28 @@ function ToolEntry({ part }: ToolEntryProps) {
                 )}
               </div>
             ))}
+          {showRawSearchDrilldown && (
+            <details className="max-w-full">
+              <summary className={cn(TOOL_SECTION_LABEL_CLASS, 'mb-0')}>{copy.rawResponse}</summary>
+              <pre className={cn(TOOL_SECTION_PRE_CLASS, 'mt-1 whitespace-pre-wrap wrap-anywhere')}>
+                {view.rawResult}
+              </pre>
+            </details>
+          )}
           {toolViewMode === 'technical' && !(isFileEdit && view.inlineDiff) && (
             <pre className={cn(TOOL_SECTION_PRE_CLASS, 'whitespace-pre-wrap wrap-anywhere')}>
-              {technicalTrace(part.args, part.result)}
+              {rawTechnicalTrace(part.args, part.result)}
             </pre>
           )}
           {toolViewMode === 'technical' && isFileEdit && view.inlineDiff && (
             <details className="max-w-full">
               <summary className={cn(TOOL_SECTION_LABEL_CLASS, 'mb-0 cursor-pointer')}>Tool payload</summary>
               <pre className={cn(TOOL_SECTION_PRE_CLASS, 'mt-1 whitespace-pre-wrap wrap-anywhere')}>
-                {technicalTrace(part.args, part.result)}
+                {rawTechnicalTrace(part.args, part.result)}
               </pre>
             </details>
           )}
         </div>
-      )}
-    </div>
-  )
-}
-
-interface TerminalTranscriptProps {
-  command?: string
-  exitCode?: number
-}
-
-function TerminalTranscript({ command, exitCode }: TerminalTranscriptProps) {
-  if (!command && exitCode === undefined) {
-    return null
-  }
-
-  return (
-    <div className="flex min-w-0 items-center gap-2 rounded-[0.25rem] border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) px-2 py-1.5 font-mono text-[0.7rem] leading-relaxed">
-      {command && (
-        <code className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-(--ui-text-secondary)">
-          <span aria-hidden className="select-none text-(--ui-accent-secondary)">
-            ${' '}
-          </span>
-          {command}
-        </code>
-      )}
-      {exitCode !== undefined && (
-        <span
-          className={cn(
-            'shrink-0 rounded bg-(--ui-bg-tertiary) px-1 py-px text-[0.6rem] tabular-nums',
-            exitCode === 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
-          )}
-        >
-          exit {exitCode}
-        </span>
       )}
     </div>
   )

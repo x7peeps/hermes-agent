@@ -4,7 +4,6 @@ import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 
 import { useI18n } from '@/i18n'
 import { resetBrowseState } from '@/store/composer-input-history'
 import {
-  $parkedQueueSessions,
   $queuedPromptsBySession,
   getQueuedPrompts,
   MAX_AUTO_DRAIN_ATTEMPTS,
@@ -13,7 +12,7 @@ import {
   shouldAutoDrain
 } from '@/store/composer-queue'
 import { notify } from '@/store/notifications'
-import { $workingSessionIds } from '@/store/session-states'
+import { $workingSessionIds } from '@/store/session'
 
 import type { SubmitTextOptions } from './use-prompt-actions/utils'
 
@@ -44,7 +43,6 @@ export function useBackgroundQueueDrain({
 }: BackgroundQueueDrainOptions) {
   const { t } = useI18n()
   const queuedPromptsBySession = useStore($queuedPromptsBySession)
-  const parkedQueueSessions = useStore($parkedQueueSessions)
   const workingSessionIds = useStore($workingSessionIds)
   const submitTextRef = useRef(submitText)
   const drainingSessionIdsRef = useRef(new Set<string>())
@@ -159,11 +157,7 @@ export function useBackgroundQueueDrain({
       if (
         sessionKey === selectedStoredSessionId ||
         drainingSessionIdsRef.current.has(sessionKey) ||
-        !shouldAutoDrain({
-          isBusy: working.has(sessionKey),
-          parked: Boolean(parkedQueueSessions[sessionKey]),
-          queueLength: entries.length
-        })
+        !shouldAutoDrain({ isBusy: working.has(sessionKey), queueLength: entries.length })
       ) {
         continue
       }
@@ -176,13 +170,5 @@ export function useBackgroundQueueDrain({
 
       drainSessionQueue(sessionKey, entry)
     }
-  }, [
-    drainSessionQueue,
-    enabled,
-    parkedQueueSessions,
-    queuedPromptsBySession,
-    retryTick,
-    selectedStoredSessionId,
-    workingSessionIds
-  ])
+  }, [drainSessionQueue, enabled, queuedPromptsBySession, retryTick, selectedStoredSessionId, workingSessionIds])
 }

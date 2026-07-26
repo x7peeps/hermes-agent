@@ -144,6 +144,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/apple/apple-apple-reminders',
                     'user-guide/skills/bundled/apple/apple-findmy',
                     'user-guide/skills/bundled/apple/apple-imessage',
+                    'user-guide/skills/bundled/apple/apple-macos-computer-use',
                   ],
                 },
                 {
@@ -156,15 +157,6 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-codex',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-hermes-agent',
                     'user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-opencode',
-                  ],
-                },
-                {
-                  type: 'category',
-                  label: 'computer-use',
-                  key: 'skills-bundled-computer-use',
-                  collapsed: true,
-                  items: [
-                    'user-guide/skills/bundled/computer-use/computer-use-computer-use',
                   ],
                 },
                 {
@@ -234,15 +226,6 @@ const sidebars: SidebarsConfig = {
                 },
                 {
                   type: 'category',
-                  label: 'hermes-desktop-plugins',
-                  key: 'skills-bundled-hermes-desktop-plugins',
-                  collapsed: true,
-                  items: [
-                    'user-guide/skills/bundled/hermes-desktop-plugins/hermes-desktop-plugins-hermes-desktop-plugins',
-                  ],
-                },
-                {
-                  type: 'category',
                   label: 'media',
                   key: 'skills-bundled-media',
                   collapsed: true,
@@ -284,17 +267,14 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/bundled/productivity/productivity-airtable',
-                    'user-guide/skills/bundled/productivity/productivity-docx',
                     'user-guide/skills/bundled/productivity/productivity-google-workspace',
                     'user-guide/skills/bundled/productivity/productivity-maps',
                     'user-guide/skills/bundled/productivity/productivity-nano-pdf',
                     'user-guide/skills/bundled/productivity/productivity-notion',
                     'user-guide/skills/bundled/productivity/productivity-ocr-and-documents',
-                    'user-guide/skills/bundled/productivity/productivity-pdf',
                     'user-guide/skills/bundled/productivity/productivity-petdex',
                     'user-guide/skills/bundled/productivity/productivity-powerpoint',
                     'user-guide/skills/bundled/productivity/productivity-teams-meeting-pipeline',
-                    'user-guide/skills/bundled/productivity/productivity-xlsx',
                   ],
                 },
                 {
@@ -409,7 +389,6 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/optional/creative/creative-kanban-video-orchestrator',
                     'user-guide/skills/optional/creative/creative-meme-generation',
                     'user-guide/skills/optional/creative/creative-pixel-art',
-                    'user-guide/skills/optional/creative/creative-unreal-mcp',
                   ],
                 },
                 {
@@ -592,7 +571,6 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/optional/security/security-godmode',
                     'user-guide/skills/optional/security/security-oss-forensics',
                     'user-guide/skills/optional/security/security-sherlock',
-                    'user-guide/skills/optional/security/security-unbroker',
                     'user-guide/skills/optional/security/security-web-pentest',
                   ],
                 },
@@ -613,7 +591,6 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-optional-web-development',
                   collapsed: true,
                   items: [
-                    'user-guide/skills/optional/web-development/web-development-cloudflare-temporary-deploy',
                     'user-guide/skills/optional/web-development/web-development-page-agent',
                   ],
                 },
@@ -767,7 +744,6 @@ const sidebars: SidebarsConfig = {
               link: {type: 'doc', id: 'developer-guide/plugins/index'},
               items: [
                 'developer-guide/plugin-llm-access',
-                'developer-guide/desktop-plugin-sdk',
                 'developer-guide/memory-provider-plugin',
                 'developer-guide/context-engine-plugin',
                 'developer-guide/secret-source-plugin',
