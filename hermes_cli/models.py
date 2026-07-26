@@ -2497,7 +2497,6 @@ _MODELS_DEV_PREFERRED: frozenset[str] = frozenset({
     "deepseek",
     "kilocode",
     "fireworks",
-    "mistral",
     "togetherai",
     "cohere",
     "perplexity",
