@@ -196,7 +196,7 @@ async def test_picker_tap_global_flag_persists(tmp_path, monkeypatch, seed_model
     assert written["model"]["default"] == "gpt-5.5"
     assert written["model"]["provider"] == "openrouter"
     assert "base_url" not in written["model"]
-    assert "api_key" not in written["model"]
+    assert written["model"].get("api_key") == ""
     assert "api_mode" not in written["model"]
     assert "context_length" not in written["model"]
 
