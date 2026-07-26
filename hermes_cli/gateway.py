@@ -3997,6 +3997,14 @@ def generate_launchd_plist() -> str:
     )
     prog_args_xml = "\n        ".join(prog_args)
 
+    # launchd IS an external supervisor (KeepAlive restarts the gateway).
+    # Set HERMES_GATEWAY_EXTERNAL_SUPERVISOR so is_gateway_supervisor_process()
+    # returns True and the gateway skips spawning its own detached restart
+    # watcher. Without this, the watcher fights launchd's KeepAlive, producing
+    # 3-5 concurrent gateway PIDs and platform adapter conflicts (Feishu, etc.).
+    # See #7061, #71645.
+    external_supervisor_env = EXTERNAL_GATEWAY_SUPERVISOR_ENV
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -4020,6 +4028,13 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
+        <!-- Tell the gateway it runs under an external supervisor (launchd).
+             This prevents _spawn_gateway_restart_watcher() from spawning a
+             competing restart-watcher process that conflicts with launchd's
+             own KeepAlive restart logic, causing zombie gateway processes
+             and platform adapter conflicts (e.g. Feishu). See #7061, #71645. -->
+        <key>{external_supervisor_env}</key>
+        <string>1</string>
     </dict>
 
     <key>LimitLoadToSessionType</key>

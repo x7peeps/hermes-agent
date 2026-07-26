@@ -1,6 +1,7 @@
 """Tests for gateway service management helpers."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -3590,6 +3591,34 @@ class TestServiceWorkingDirIsStable:
         # The old conditional dict form must NOT appear
         assert "SuccessfulExit" not in plist
         assert "<key>KeepAlive</key>\n    <dict>" not in plist
+
+    def test_launchd_plist_includes_external_supervisor_env(self, tmp_path, monkeypatch):
+        """launchd plist must set HERMES_GATEWAY_EXTERNAL_SUPERVISOR=1.
+
+        launchd IS an external supervisor (KeepAlive restarts the gateway).
+        Without this env var, ``is_gateway_supervisor_process()`` returns False,
+        so the gateway spawns its own detached restart-watcher that fights
+        launchd's KeepAlive, producing zombie gateway processes and platform
+        adapter conflicts (Feishu multi-instance collision #7061, #71645).
+        """
+        from gateway.restart import EXTERNAL_GATEWAY_SUPERVISOR_ENV
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+        plist = gateway_cli.generate_launchd_plist()
+
+        # The env var key must be present in the EnvironmentVariables dict
+        assert f"<key>{EXTERNAL_GATEWAY_SUPERVISOR_ENV}</key>" in plist
+        # The value must be set to "1"
+        assert "<string>1</string>" in plist
+        # Verify it's inside the EnvironmentVariables section (not elsewhere)
+        env_section_match = re.search(
+            r"<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>", plist, re.DOTALL
+        )
+        assert env_section_match, "plist has no EnvironmentVariables dict"
+        env_section = env_section_match.group(1)
+        assert EXTERNAL_GATEWAY_SUPERVISOR_ENV in env_section
 
 
 class TestLaunchctlBootstrapEioRetry:
