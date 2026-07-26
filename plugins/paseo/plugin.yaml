@@ -1,0 +1,14 @@
+---
+name: paseo-bridge
+version: 1.0.0
+description: "Bridge to Paseo daemon — orchestrate external coding agents (Claude Code, Codex, Copilot, OpenCode) through Paseo's WebSocket API from within Hermes."
+author: "x7peeps"
+tools:
+  - paseo_list_providers
+  - paseo_list_models
+  - paseo_create_agent
+  - paseo_send_prompt
+  - paseo_list_agents
+  - paseo_list_workspaces
+  - paseo_create_workspace
+hooks: []

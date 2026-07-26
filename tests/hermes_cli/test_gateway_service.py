@@ -1,6 +1,7 @@
 """Tests for gateway service management helpers."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -735,14 +736,27 @@ class TestLaunchdServiceRecovery:
         assert "--replace" in plist_path.read_text(encoding="utf-8")
         # No DIRECT bootout/bootstrap ran (those would kill us mid-sequence).
         assert not [c for c in run_calls if "bootout" in c or "bootstrap" in c]
-        # Exactly one detached helper was spawned, in a new session, and it
-        # performs both bootout and bootstrap.
+        # Exactly one Popen call was made for the transient launchd job.
         assert len(popen_calls) == 1
         cmd, kwargs = popen_calls[0]
-        assert kwargs.get("start_new_session") is True
-        script = cmd[-1]
+        # Must use `launchctl submit` (not `start_new_session=True`) so the
+        # helper runs as a transient launchd job outside the gateway's process
+        # coalition, surviving bootout (#69098).
+        assert cmd[:3] == ["launchctl", "submit", "-l"]
+        assert kwargs.get("start_new_session") is not True
+        assert "-o" in cmd
+        assert "-e" in cmd
+        # The script is passed via -- /bin/bash -c ...
+        bash_idx = cmd.index("--") + 1
+        assert cmd[bash_idx] == "/bin/bash"
+        assert cmd[bash_idx + 1] == "-c"
+        script = cmd[bash_idx + 2]
         assert "bootout" in script and "bootstrap" in script
         assert str(plist_path) in script
+        # The one-shot job must deregister its own transient label at the end,
+        # otherwise every reload leaks a dead label in launchd.
+        submit_label = cmd[cmd.index("-l") + 1]
+        assert f"launchctl remove {submit_label}" in script
 
     def test_refresh_uses_direct_reload_when_not_inside_gateway_tree(self, tmp_path, monkeypatch):
         """Normal CLI-initiated refresh (outside the service tree) keeps the
@@ -3577,6 +3591,34 @@ class TestServiceWorkingDirIsStable:
         # The old conditional dict form must NOT appear
         assert "SuccessfulExit" not in plist
         assert "<key>KeepAlive</key>\n    <dict>" not in plist
+
+    def test_launchd_plist_includes_external_supervisor_env(self, tmp_path, monkeypatch):
+        """launchd plist must set HERMES_GATEWAY_EXTERNAL_SUPERVISOR=1.
+
+        launchd IS an external supervisor (KeepAlive restarts the gateway).
+        Without this env var, ``is_gateway_supervisor_process()`` returns False,
+        so the gateway spawns its own detached restart-watcher that fights
+        launchd's KeepAlive, producing zombie gateway processes and platform
+        adapter conflicts (Feishu multi-instance collision #7061, #71645).
+        """
+        from gateway.restart import EXTERNAL_GATEWAY_SUPERVISOR_ENV
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+        plist = gateway_cli.generate_launchd_plist()
+
+        # The env var key must be present in the EnvironmentVariables dict
+        assert f"<key>{EXTERNAL_GATEWAY_SUPERVISOR_ENV}</key>" in plist
+        # The value must be set to "1"
+        assert "<string>1</string>" in plist
+        # Verify it's inside the EnvironmentVariables section (not elsewhere)
+        env_section_match = re.search(
+            r"<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>", plist, re.DOTALL
+        )
+        assert env_section_match, "plist has no EnvironmentVariables dict"
+        env_section = env_section_match.group(1)
+        assert EXTERNAL_GATEWAY_SUPERVISOR_ENV in env_section
 
 
 class TestLaunchctlBootstrapEioRetry:
