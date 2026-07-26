@@ -1492,3 +1492,78 @@ class TestMkdtempOSErrorNoSpace:
             result = _resolve_tirith_path("tirith")
             assert _tirith_mod._resolved_path is _INSTALL_FAILED
             mock_mark.assert_called_once_with("no_space")
+
+
+# ---------------------------------------------------------------------------
+# Issue #71350: Circuit breaker should honor tirith_fail_open
+# ---------------------------------------------------------------------------
+
+class TestCircuitBreakerFailClosed:
+    """When the circuit breaker is open, tirith_fail_open=false should block
+    commands instead of allowing them unconditionally."""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_circuit_open_fail_closed_blocks(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": False}
+        # Simulate circuit already open
+        _tirith_mod._circuit_open = True
+        result = check_command_security("rm -rf /")
+        assert result["action"] == "block"
+        assert "circuit breaker" in result["summary"]
+        assert "fail-closed" in result["summary"]
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_circuit_open_fail_open_allows(self, mock_cfg, mock_run):
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+        # Simulate circuit already open
+        _tirith_mod._circuit_open = True
+        result = check_command_security("rm -rf /")
+        assert result["action"] == "allow"
+        assert "circuit breaker" in result["summary"]
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_crash_counter_resets_on_verdict_exit_codes(self, mock_cfg, mock_run):
+        """Exit codes 0, 1, 2 are documented tirith verdicts, not crashes.
+        The crash counter should reset on all three, not just 0."""
+        mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
+                                 "tirith_timeout": 5, "tirith_fail_open": True}
+
+        # Set crash counter to 2 (one away from opening the breaker)
+        _tirith_mod._crash_count = 2
+        _tirith_mod._circuit_open = False
+
+        # Exit code 1 (block verdict) should reset counter and NOT open breaker
+        mock_run.return_value = _mock_run(1, "")
+        result = check_command_security("suspicious_cmd")
+        assert result["action"] == "block"
+        assert _tirith_mod._crash_count == 0
+        assert _tirith_mod._circuit_open is False
+
+        # Exit code 2 (warn verdict) should also reset counter
+        _tirith_mod._crash_count = 2
+        mock_run.return_value = _mock_run(2, "")
+        result = check_command_security("another_cmd")
+        assert result["action"] == "warn"
+        assert _tirith_mod._crash_count == 0
+        assert _tirith_mod._circuit_open is False
+
+        # Exit code 0 (allow verdict) should also reset counter
+        _tirith_mod._crash_count = 2
+        mock_run.return_value = _mock_run(0, "")
+        result = check_command_security("safe_cmd")
+        assert result["action"] == "allow"
+        assert _tirith_mod._crash_count == 0
+        assert _tirith_mod._circuit_open is False
+
+        # Only unexpected exit codes should increment crash counter
+        _tirith_mod._crash_count = 0
+        mock_run.return_value = _mock_run(99, "")
+        result = check_command_security("bad_cmd")
+        assert result["action"] == "allow"  # fail_open=True
+        assert _tirith_mod._crash_count == 1
+        assert _tirith_mod._circuit_open is False
