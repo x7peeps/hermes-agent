@@ -9119,23 +9119,37 @@ def _log_only_write(text: str) -> None:
         pass
 
 
-def _run_logged_subprocess(cmd, *, cwd=None, env=None):
+def _run_logged_subprocess(cmd, *, cwd=None, env=None, timeout=600):
     """Run ``cmd`` capturing combined output into update.log (not the terminal).
 
     Returns the ``CompletedProcess`` (with ``stdout`` populated) so the caller
     can decide whether to surface the captured output on failure.
+    On timeout, a non-zero ``CompletedProcess`` is returned with any partial
+    output, so callers can route through existing non-fatal error paths.
     """
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout.decode("utf-8", errors="replace") if exc.stdout else "")
+        _log_only_write(partial)
+        _log_only_write(f"\n[update] subprocess timed out after {timeout}s")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=-1,
+            stdout=partial + f"\n[update] subprocess timed out after {timeout}s",
+        )
     _log_only_write(result.stdout or "")
     return result
 

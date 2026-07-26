@@ -387,3 +387,45 @@ class TestRunLoggedSubprocess:
         assert result.returncode == 3
         assert "boom" in (result.stdout or "")
         assert terminal.getvalue() == ""
+
+    def test_timeout_returns_nonzero_completed_process(self, monkeypatch):
+        """A subprocess that exceeds the timeout must return a non-zero
+        ``CompletedProcess`` (not raise) so the caller's existing non-fatal
+        error path is reached."""
+        terminal = io.StringIO()
+        log = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", _UpdateOutputStream(terminal, log))
+
+        result = _run_logged_subprocess(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time; sys.stdout.write('partial\\n'); sys.stdout.flush(); time.sleep(10)",
+            ],
+            timeout=1,
+        )
+
+        assert result.returncode == -1
+        assert "partial" in (result.stdout or "")
+        assert "timed out after 1s" in (result.stdout or "")
+        # Partial output was also written to the update log
+        assert "partial" in log.getvalue()
+        assert "timed out after 1s" in log.getvalue()
+        assert terminal.getvalue() == ""  # never echoed to terminal
+
+    def test_explicit_timeout_passed_through(self, monkeypatch):
+        """The timeout kwarg must be honoured — a fast subprocess with a short
+        timeout must succeed normally."""
+        terminal = io.StringIO()
+        log = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", _UpdateOutputStream(terminal, log))
+
+        result = _run_logged_subprocess(
+            [sys.executable, "-c", "print('done')"],
+            timeout=30,
+        )
+
+        assert result.returncode == 0
+        assert "done" in (result.stdout or "")
+        assert terminal.getvalue() == ""
+        assert "done" in log.getvalue()
