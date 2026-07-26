@@ -32,12 +32,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from typing import Optional
+
 from gateway.config import GatewayConfig, HomeChannel, Platform
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.run import (
     _AGENT_PENDING_SENTINEL,
     _auto_continue_freshness_window,
     _coerce_gateway_timestamp,
+    _is_effective_message,
     _is_fresh_gateway_interruption,
     _last_transcript_timestamp,
     _should_clear_resume_pending_after_turn,
@@ -112,7 +115,8 @@ def _simulate_note_injection(
     *,
     agent_history: list | None = None,
     window_secs: float | None = None,
-) -> str:
+    interactive: bool = True,
+) -> Optional[str]:
     """Mirror the note-injection logic in gateway/run.py _run_agent().
 
     The freshness signal reads ``history[-1].timestamp`` (the raw transcript
@@ -155,7 +159,7 @@ def _simulate_note_injection(
         reason = getattr(resume_entry, "resume_reason", None) or "restart_timeout"
         # Real production note builder — extracted to module scope in
         # gateway/run.py so tests exercise the actual strings.
-        message = build_resume_recovery_note(reason, message)
+        message = build_resume_recovery_note(reason, message, interactive=interactive)
     elif has_fresh_tool_tail:
         message = (
             "[System note: A new message has arrived. The conversation "
@@ -174,7 +178,7 @@ def _simulate_note_injection(
         and getattr(resume_entry, "resume_pending", False)
     ):
         sn_reason = getattr(resume_entry, "resume_reason", None) or "restart_timeout"
-        message = build_resume_recovery_note(sn_reason, "")
+        message = build_resume_recovery_note(sn_reason, "", interactive=interactive)
     return message
 
 
@@ -483,13 +487,37 @@ class TestResumePendingSystemNote:
         )
         assert "gateway shutdown" in result
 
-    def test_empty_message_interactive_note_asks_what_next(self):
-        """Interactive platforms: the startup auto-resume turn reports the
-        restore and asks the (present) human what to do next."""
+    def test_empty_message_interactive_skips_model(self):
+        """Interactive platforms: the startup auto-resume turn returns None so
+        the caller skips the model entirely -- no "what next?" noise (#72280)."""
         note = build_resume_recovery_note("restart_timeout", "", interactive=True)
-        assert "session was restored" in note
-        assert "ask what they would like to do next" in note
-        assert "skip any unfinished work" in note
+        assert note is None
+
+    def test_sender_only_message_interactive_skips_model(self):
+        """A shared-session sender-only prefix like ``[Example User] `` is
+        treated as empty and returns None on interactive platforms (#72280)."""
+        note = build_resume_recovery_note(
+            "restart_timeout", "[Example User] ", interactive=True,
+        )
+        assert note is None
+
+    def test_sender_only_message_noninteractive_still_runs(self):
+        """Sender-only prefix on a non-interactive platform still produces a
+        recovery note (the model should continue the interrupted task)."""
+        note = build_resume_recovery_note(
+            "restart_timeout", "[Example User] ", interactive=False,
+        )
+        assert note is not None
+        assert "CONTINUE the interrupted task" in note
+
+    def test_sender_prefix_with_real_content_is_not_empty(self):
+        """When the message has a sender prefix AND real content, it is treated
+        as having content and the NEW message guidance is used."""
+        note = build_resume_recovery_note(
+            "restart_timeout", "[Example User] please help me", interactive=True,
+        )
+        assert note is not None
+        assert "NEW message" in note
 
     def test_empty_message_noninteractive_note_continues_task(self):
         """Non-interactive platforms (webhook, API server): nobody can answer
@@ -604,13 +632,9 @@ class TestResumePendingSystemNote:
         assert "gateway restart" in result
 
     def test_empty_resume_turn_never_reaches_model_blank(self):
-        """Regression: a blank auto-resume turn on a resume_pending
-        session must be backfilled with a recovery note, never sent empty.
-
-        _schedule_resume_pending_sessions dispatches an empty-text internal
-        event. If the resume_pending branch did not fire, the safety net
-        must still produce non-blank text so the model does not reply with
-        confused 'the message came through blank' noise.
+        """On an interactive platform, an empty auto-resume turn with
+        resume_pending should be skipped entirely (returns None) rather than
+        asking the model to prompt for instructions (#72280).
         """
         entry = self._pending_entry()
         # Force the resume_pending branch to miss by making BOTH signals stale,
@@ -625,8 +649,29 @@ class TestResumePendingSystemNote:
             resume_entry=entry,
             window_secs=1800,
         )
-        assert result.strip(), "blank turn must never reach the model"
+        # Safety net returns None for interactive empty auto-resume --
+        # the caller should skip the model invocation entirely.
+        assert result is None
+
+    def test_empty_resume_turn_safety_net_non_interactive(self):
+        """On a non-interactive platform, the safety net must still produce a
+        recovery note so the model can continue the interrupted work.
+        """
+        entry = self._pending_entry()
+        entry.last_resume_marked_at = datetime.now() - timedelta(hours=2)
+        history = [
+            {"role": "assistant", "content": "old", "timestamp": time.time() - 7200},
+        ]
+        result = _simulate_note_injection(
+            history=history,
+            user_message="",
+            resume_entry=entry,
+            window_secs=1800,
+            interactive=False,
+        )
+        assert result is not None
         assert "[System note:" in result
+        assert "CONTINUE the interrupted task" in result
 
     def test_empty_turn_guard_only_applies_to_resume_pending(self):
         """The empty-turn backfill must NOT fire for ordinary sessions —
@@ -791,10 +836,10 @@ class TestResumePendingSystemNote:
         assert "already" in result and "do NOT re-execute or verify" in result
         assert "restarted!" in result
 
-    def test_resume_pending_empty_message_reports_recovery(self):
-        """On the empty-message auto-resume startup turn there is no NEW user
-        message, so the note instructs the model to report recovery and ask
-        for instructions rather than 'address the user's NEW message'.
+    def test_resume_pending_empty_message_skips_interactive(self):
+        """On the empty-message auto-resume startup turn on an interactive
+        platform there is no NEW user message, so the model should be skipped
+        entirely rather than prompting for instructions (#72280).
         """
         entry = self._pending_entry(reason="restart_timeout")
         result = _simulate_note_injection(
@@ -804,15 +849,61 @@ class TestResumePendingSystemNote:
             user_message="",
             resume_entry=entry,
         )
+        # Interactive empty auto-resume returns None -- skip the model.
+        assert result is None
+
+    def test_resume_pending_empty_message_non_interactive(self):
+        """On a non-interactive platform, the empty auto-resume should still
+        produce a recovery note so the model can continue the interrupted work.
+        """
+        entry = self._pending_entry(reason="restart_timeout")
+        result = _simulate_note_injection(
+            history=[
+                {"role": "assistant", "content": "in progress", "timestamp": time.time()},
+            ],
+            user_message="",
+            resume_entry=entry,
+            interactive=False,
+        )
+        assert result is not None
         assert "[System note:" in result
         assert "gateway restart" in result
-        assert "restored successfully" in result
-        assert "ask what they would like to do next" in result
+        assert "CONTINUE the interrupted task" in result
         assert "do NOT re-execute or verify" in result
         # No phantom "NEW message" instruction when there is no new message.
         assert "NEW message" not in result
         # Nothing appended after the closing bracket (no empty user text).
         assert result.rstrip().endswith("]")
+
+
+# ---------------------------------------------------------------------------
+# _is_effective_message
+# ---------------------------------------------------------------------------
+
+
+class TestIsEffectiveMessage:
+    """Verify that sender-only attribution is not mistaken for real content."""
+
+    def test_empty_string_is_not_effective(self):
+        assert _is_effective_message("") is False
+
+    def test_whitespace_only_is_not_effective(self):
+        assert _is_effective_message("   ") is True  # plain whitespace counts
+
+    def test_sender_only_bracket_space(self):
+        assert _is_effective_message("[Example User] ") is False
+
+    def test_sender_only_bracket_newline(self):
+        assert _is_effective_message("[Example User] \n") is False
+
+    def test_sender_with_slack_user_id(self):
+        assert _is_effective_message("[Alice | Slack user <@U123>] ") is False
+
+    def test_sender_with_content_is_effective(self):
+        assert _is_effective_message("[Example User] hello there") is True
+
+    def test_regular_text_is_effective(self):
+        assert _is_effective_message("please help me") is True
 
 
 # ---------------------------------------------------------------------------
