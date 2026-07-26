@@ -1022,6 +1022,38 @@ _SYNTHETIC_USER_PREFIXES = (
 )
 
 
+def _messages_prefix_match(a: list, b: list) -> bool:
+    """Check whether two message lists match as a prefix pair.
+
+    Used by the rotation drift guard to distinguish partial compression
+    (caller intentionally passed only a head subset) from a genuine
+    concurrent append. When ``a`` is the first *N* rows of the durable
+    parent and ``b`` is the caller's ``messages`` argument, a match on
+    role+content for all positions means the caller is compressing a
+    prefix — safe to proceed. Only abort when the prefix diverges, which
+    signals that a concurrent writer appended or mutated messages after
+    the snapshot was taken.
+
+    Comparison is deliberately role+content only (not full dict equality):
+    internal flags like ``_synthetic_user`` or ``_tool_call_id`` may differ
+    between the in-memory snapshot and the durable reload without indicating
+    a real drift.
+    """
+    if len(a) != len(b):
+        return False
+    for msg_a, msg_b in zip(a, b):
+        role_a = msg_a.get("role") if isinstance(msg_a, dict) else None
+        role_b = msg_b.get("role") if isinstance(msg_b, dict) else None
+        if role_a != role_b:
+            return False
+        # For content, do a lightweight text-level check.
+        content_a = _message_text(msg_a)
+        content_b = _message_text(msg_b)
+        if content_a != content_b:
+            return False
+    return True
+
+
 def _message_text(message: Any) -> str:
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
@@ -1719,16 +1751,39 @@ def compress_context(
             if callable(durable_loader):
                 durable_parent = durable_loader(_lock_db, _lock_sid)
                 if isinstance(durable_parent, list) and len(durable_parent) > len(messages):
-                    logger.warning(
-                        "compression aborted: session=%s changed before lease "
-                        "acquisition; preserving newer durable messages",
-                        _lock_sid,
-                    )
-                    _release_lock()
-                    existing_prompt = getattr(agent, "_cached_system_prompt", None)
-                    if not existing_prompt:
-                        existing_prompt = agent._build_system_prompt(system_message)
-                    return messages, existing_prompt
+                    # The caller's snapshot may be a partial head (e.g.
+                    # ``/compress here N``) rather than the full history.
+                    # A simple length comparison would always abort partial
+                    # compression because the full durable parent is
+                    # necessarily longer than the head subset.
+                    # Distinguish a partial-compression call from a genuine
+                    # concurrent append by checking whether the caller's
+                    # messages match a prefix of the durable parent. If they
+                    # do, the extra durable rows are simply the tail that the
+                    # caller intentionally excluded — proceed with compression.
+                    # Only abort when the prefix does not match, which means
+                    # a real concurrent writer modified or appended messages
+                    # after our snapshot.
+                    _n = len(messages)
+                    if _n > 0 and _messages_prefix_match(
+                        durable_parent[:_n], messages
+                    ):
+                        logger.debug(
+                            "partial compression: durable_parent has %d rows but "
+                            "first %d match caller's messages — proceeding",
+                            len(durable_parent), _n,
+                        )
+                    else:
+                        logger.warning(
+                            "compression aborted: session=%s changed before lease "
+                            "acquisition; preserving newer durable messages",
+                            _lock_sid,
+                        )
+                        _release_lock()
+                        existing_prompt = getattr(agent, "_cached_system_prompt", None)
+                        if not existing_prompt:
+                            existing_prompt = agent._build_system_prompt(system_message)
+                        return messages, existing_prompt
 
         # Notify external memory provider before compression discards context.
         # The provider's on_pre_compress() may return a string of insights it
