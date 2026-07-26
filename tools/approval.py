@@ -1202,6 +1202,76 @@ def _shell_tokens_with_spans(segment: str, start: int):
     return tokens
 
 
+def _shell_tokens_within_substitution(
+    segment: str, target_start: int,
+) -> list[tuple[str, int, int, bool]] | None:
+    """Fallback tokeniser for ``grep`` found inside ``$()`` or backticks.
+
+    When ``_shell_tokens_with_spans`` starts mid-quote (e.g. ``"$(grep K
+    /f.env | cut -d= -f2-)"``), the outer double-quote makes shlex see the
+    trailing ``"`` as an unmatched open quote and fail.  Instead of failing
+    closed, extract the ``$()`` / backtick content that surrounds
+    *target_start* and parse *that* in isolation.
+
+    Returns the same ``(value, start, end, quoted)`` tuples as
+    ``_shell_tokens_with_spans`` (spans relative to *segment*), or ``None``
+    on uncertain parse.
+    """
+    # Find the nearest enclosing ``$(...`` or ```...`` that covers target_start.
+    sub_content: str | None = None
+    sub_offset: int | None = None
+
+    # --- Try ``$(...)`` ---
+    # Walk backwards from target_start looking for ``$(``.
+    i = target_start
+    while i > 0:
+        if segment[i - 1:i + 1] == "$(" and (i < 2 or segment[i - 2] != "$"):
+            # Found ``$(`` at position i-1.
+            open_pos = i - 1
+            # Find the matching ``)`` — must account for nested parens.
+            depth = 1
+            j = i + 1
+            while j < len(segment) and depth > 0:
+                if segment[j] == "(":
+                    depth += 1
+                elif segment[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth == 0 and j - 1 > target_start:
+                sub_content = segment[i:j - 1]
+                sub_offset = i
+                break
+        i -= 1
+
+    # --- Try backtick ```...``` ---
+    if sub_content is None:
+        # Walk backwards from target_start looking for a backtick.
+        i = target_start
+        while i > 0 and segment[i - 1] != "`":
+            i -= 1
+        if i > 0:
+            open_pos = i - 1
+            # Find the matching closing backtick.
+            j = segment.find("`", i)
+            if j > target_start:
+                sub_content = segment[i:j]
+                sub_offset = i
+
+    if sub_content is None:
+        return None
+
+    # Tokenise the extracted subshell content directly.
+    sub_tokens = _shell_tokens_with_spans(sub_content, 0)
+    if sub_tokens is None:
+        return None
+    # Remap spans back to *segment* coordinates.
+    offset = sub_offset
+    return [
+        (val, s + offset, e + offset, quoted)
+        for val, s, e, quoted in sub_tokens
+    ]
+
+
 _GREP_OPTIONS_WITH_ARG = {
     "--after-context", "--before-context", "--binary-files", "--context",
     "--directories", "--devices", "--exclude", "--exclude-dir",
@@ -1230,7 +1300,16 @@ def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], boo
                 continue
             tokens = _shell_tokens_with_spans(segment, start)
             if tokens is None:
-                return [], True
+                # Tokenization failed — usually because *start* falls inside
+                # a `$()` or backtick substitution within double quotes, so
+                # shlex sees a trailing `"` as an unmatched open quote.
+                # Try extracting the `$()` content around *start* and parsing
+                # that in isolation before failing closed.  This prevents
+                # benign admin commands like `curl -u "$(grep K /f.env | cut
+                # -d= -f2-)"` from hitting the hardline floor (#71871).
+                tokens = _shell_tokens_within_substitution(segment, start)
+                if tokens is None:
+                    return [], True
             args = tokens[1:]
             pcre = False
             explicit_patterns = False
