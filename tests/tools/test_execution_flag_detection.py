@@ -492,6 +492,53 @@ def test_malformed_quoted_executable_payloads_fail_closed(command):
     assert description == "command parser limit or malformed executable payload"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Command-substitution patterns inside double quotes should NOT hardline
+        # block — they are common admin idioms (#71871).
+        'curl -s http://127.0.0.1/api -u "$(grep API_KEY /path/.env | cut -d= -f2-)"',
+        'curl -s http://127.0.0.1/api -u "$(grep K /f | cut):$(grep K2 /f2 | cut)"',
+        # backtick variant
+        "curl -s http://127.0.0.1/api -u `grep API_KEY /path/.env | cut -d= -f2-`",
+        # grep with -P flag inside $(...)
+        'curl -s http://127.0.0.1/api -u "$(grep -P \\"pattern\\" /f)"',
+        # Simple $(grep) in double quotes
+        'echo "$(grep foo bar)"',
+    ],
+)
+def test_command_substitution_grep_does_not_hardline_block(command):
+    """``$(grep …)`` inside double quotes must not trigger the hardline floor."""
+    is_hardline, desc = detect_hardline_command(command)
+    assert is_hardline is False, (
+        f"hardline-blocked command substitution: {desc!r} for {command!r}"
+    )
+
+
+def test_unterminated_substitution_still_fails_closed():
+    """Truly malformed input should still fail closed, not regress.
+
+    The ``_shell_tokens_within_substitution`` fallback only applies when a
+    ``grep`` is found inside a syntactically valid ``$()``/backtick group.
+    Malformed quoting from the original code path must still fail closed.
+    """
+    # These cases have unbalanced quotes that shlex cannot parse, and the
+    # content is NOT inside a valid ``$()``, so the fallback returns None
+    # and the original fail-closed behaviour stands.
+    dangerous1, _, desc1 = detect_dangerous_command(
+        "sort --compress-program=\"sh -c 'unterminated names"
+    )
+    assert dangerous1 is True
+    assert desc1 == "command parser limit or malformed executable payload"
+
+    # A bare unterminated double-quote with an execution flag
+    dangerous2, _, desc2 = detect_dangerous_command(
+        "python3 -c \"unterminated"
+    )
+    assert dangerous2 is True
+    assert desc2 == "command parser limit or malformed executable payload"
+
+
 def _time_benign_segments(count):
     command = ";".join(f"printf segment-{index}" for index in range(count))
     started = time.perf_counter()
