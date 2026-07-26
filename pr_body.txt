@@ -1,0 +1,19 @@
+## 背景
+
+修复 #62937: Gemini (OpenAI-compat) 并行工具调用被拼接为单个 tool_calls entry → arguments 作为 {} 丢弃
+
+## 根因分析
+
+Gemini 的 OpenAI 兼容端点在发送并行工具调用时，所有 delta 都带有相同的 `index=0` 和相同的 `delta.id`。流式组装器（streaming assembler）中已有的 Ollama 修复逻辑仅在 id 不同时触发重定向，因此从未生效。多个工具调用的参数被拼接进同一个 slot，产生无效 JSON（如 `{"a":1}{"b":2}`），`_repair_tool_call_arguments()` 无法拆分此类拼接对象，最终 fallback 到 `{}` — 导致用户看到 agent "响应了但什么也没做"。
+
+## 修复方式
+
+在现有 id-change 重定向逻辑之后，新增 name-change 重定向：当到达一个已填充 slot 的 delta 具有**不同的函数名**时，将其重定向到新 slot。这与已有的 id-change 重定向形成互补，覆盖 Gemini 场景（index 相同 + id 相同 + 函数名不同）。
+
+## 验证
+
+- [x] 代码变更已在本地验证（模拟测试确认两个不同函数名的并行调用被正确分配到不同 slot）
+- [x] 遵循项目 AGENTS.md 贡献规范
+- [x] 无破坏性变更（仅新增条件分支，不影响已有 Ollama/id-change 路径）
+
+Closes #62937
