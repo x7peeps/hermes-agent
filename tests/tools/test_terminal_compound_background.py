@@ -126,11 +126,24 @@ class TestQuotingAndParens:
         cmd = 'echo "A && B &"'
         assert rewrite(cmd) == 'echo "A && B &"'
 
-    def test_parenthesised_subshell_left_alone(self):
-        # `(A && B) &` has the same bug class but isn't the common agent
-        # pattern. Leave for a follow-up; do not rewrite and do not
-        # misrewrite content inside the parens.
-        assert rewrite("(A && B) &") == "(A && B) &"
+    def test_parenthesised_subshell_rewritten(self):
+        # `(A && B) &` has the same subshell-wait bug as `A && B &`.
+        # It is now rewritten to `{ A && B & }`.
+        assert rewrite("(A && B) &") == "{ A && B & }"
+
+    def test_paren_with_following_command(self):
+        # `(A && B) & C` — same syntax-error bug as `A && B & C`.
+        result = rewrite("(A && B) & C")
+        assert result == "{ A && B & }; C"
+        import subprocess
+        proc = subprocess.run(
+            ["bash", "-n", "-c", result], capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"bash syntax error: {proc.stderr}"
+
+    def test_paren_no_compound_not_rewritten(self):
+        # `(A) &` — no `&&`/`||` inside, no bug.
+        assert rewrite("(A) &") == "(A) &"
 
     def test_command_substitution_not_rewritten(self):
         # $(A && B) is command substitution; the `&&` inside is a compound
@@ -160,6 +173,34 @@ class TestIdempotence:
     def test_multiline_idempotent(self):
         once = rewrite("cd /tmp && server &\nsleep 1")
         assert rewrite(once) == once
+
+
+class TestTrailingCommand:
+    """`A && B & C` must produce valid bash — insert `;` after the brace group."""
+
+    def test_and_bg_then_command(self):
+        result = rewrite("A && B & C")
+        assert result == "A && { B & }; C"
+        import subprocess
+        proc = subprocess.run(
+            ["bash", "-n", "-c", result], capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"bash syntax error: {proc.stderr}"
+
+    def test_or_bg_then_command(self):
+        result = rewrite("A || B & C")
+        assert result == "A || { B & }; C"
+        import subprocess
+        proc = subprocess.run(
+            ["bash", "-n", "-c", result], capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"bash syntax error: {proc.stderr}"
+
+    def test_bg_then_command_on_newline_ok(self):
+        # Newline acts as a statement separator; no `;` needed.
+        cmd = "A && B &\nC"
+        result = rewrite(cmd)
+        assert result == "A && { B & }\nC"
 
 
 class TestEdgeCases:
