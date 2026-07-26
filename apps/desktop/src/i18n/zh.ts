@@ -129,6 +129,7 @@ export const zh: Translations = {
     errors: {
       elevenLabsNeedsKey: 'ElevenLabs STT 需要 ELEVENLABS_API_KEY。',
       elevenLabsRejectedKey: 'ElevenLabs 拒绝了该 API key (401)。',
+      gatewayAuthFailed: '网关认证失败 — 请检查你的 API_SERVER_KEY。',
       methodNotAllowed: '桌面后端拒绝了该请求 (405 Method Not Allowed)。请尝试重启 Hermes Desktop。',
       microphonePermission: '麦克风权限已被拒绝。',
       openaiRejectedApiKey: 'OpenAI 拒绝了该 API key。',
@@ -1041,6 +1042,12 @@ export const zh: Translations = {
       messages: count => `${count} 条消息`,
       restored: '已恢复',
       deleteConfirm: title => `永久删除“${title}”？此操作无法撤销。`,
+      autoArchiveTitle: '自动归档闲置会话',
+      autoArchiveDesc:
+        '自动归档你一段时间未使用的会话。已置顶的会话永远不会被归档，也不会删除任何内容——归档的会话会移动到这里。',
+      autoArchiveDaysLabel: '归档前',
+      autoArchiveDaysUnit: '天无活动',
+      autoArchiveFailed: '无法更新自动归档设置',
       defaultDirTitle: '默认项目目录',
       defaultDirDesc: '新会话默认从此文件夹开始，除非你选择其他目录。留空则使用你的 home 目录。',
       defaultDirUpdated: '默认项目目录已更新',
@@ -1961,6 +1968,13 @@ export const zh: Translations = {
       ageDay: '天',
       ageHour: '时',
       ageMin: '分'
+    },
+    dateDivider: {
+      today: '今天早些时候',
+      yesterday: '昨天',
+      thisWeek: '本周',
+      lastWeek: '上周',
+      thisMonth: '本月'
     }
   },
 
