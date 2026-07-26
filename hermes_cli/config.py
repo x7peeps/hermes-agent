@@ -1398,6 +1398,15 @@ DEFAULT_CONFIG = {
 
     "compression": {
         "enabled": True,
+        "progress_notices": False,    # opt-in (#52995): when True, routine compression
+                                      # progress statuses (compacting/preflight/pre-API/
+                                      # idle/retry) are delivered to chat gateway
+                                      # platforms instead of being suppressed by the
+                                      # gateway noise filter. Default False keeps
+                                      # routine compression silent-by-design on chat
+                                      # surfaces (server-side logging only). Failure
+                                      # notices and manual /compress feedback are
+                                      # always visible regardless of this setting.
         "threshold": 0.50,            # compress when context usage exceeds this ratio.
                                       # Models with context windows below 512K are
                                       # floored at 0.75 (raise-only) so compaction
@@ -1409,12 +1418,43 @@ DEFAULT_CONFIG = {
                                       # the model's context length at apply-time.
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
+        "min_tail_user_messages": 1,  # REAL (actionable) user messages guaranteed to
+                                      # survive in the uncompressed tail. 1 = existing
+                                      # single last-user anchor (default, behavior-
+                                      # preserving); raise to e.g. 3 to keep the last
+                                      # 3 real user turns verbatim when bulky tool
+                                      # outputs fill the tail token budget.
         "max_attempts": 3,            # compression retry rounds before a turn gives up
                                       # with "max compression attempts reached". Raise
                                       # (e.g. 6) for tool-schema-heavy sessions where 3
                                       # rounds cannot clear the request estimate.
                                       # Validated >= 1, hard-capped at 10.
+        "proactive_prune_tokens": 0,  # opt-in trigger (tokens) for the deterministic,
+                                      # no-LLM tool-result prune, run independently of
+                                      # `threshold` above. On large-window models
+                                      # `threshold` (≈50% of the window) rarely fires,
+                                      # so old tool output otherwise rides in history
+                                      # and is re-sent every turn; a low value like
+                                      # 48000 reclaims it early. 0 = off. Recent tail
+                                      # protected by `protect_last_n`. Built-in
+                                      # compressor only (other engines inherit a no-op).
+                                      # NOTE: each committed prune rewrites already-sent
+                                      # history, breaking the provider prompt-cache
+                                      # prefix — the min_reclaim gate below keeps those
+                                      # breaks episodic rather than per-turn.
+        "proactive_prune_min_result_chars": 8000,  # the prune's summarize pass only
+                                      # touches tool results larger than this (chars);
+                                      # clamped to >= 200 so a generated summary can't
+                                      # itself be re-summarized.
+        "proactive_prune_min_reclaim_tokens": 4096,  # a proactive prune only commits
+                                      # when it reclaims at least this many tokens
+                                      # (measured on the pruned output). Keeps
+                                      # prompt-cache invalidation amortized: one big
+                                      # episodic break instead of a tiny break every
+                                      # tool iteration. 0 = commit any non-zero prune.
         "hygiene_hard_message_limit": 5000,  # gateway session-hygiene force-compress threshold by message count
+        "hygiene_timeout_seconds": 30,  # max seconds gateway waits for pre-agent hygiene compression
+        "hygiene_failure_cooldown_seconds": 300,  # skip repeated failed hygiene attempts for this session
         "protect_first_n": 3,         # non-system head messages always preserved
                                       # verbatim, in ADDITION to the system prompt
                                       # (which is always implicitly protected). Set to
@@ -1974,9 +2014,9 @@ DEFAULT_CONFIG = {
         # per platform:
         #   - Telegram has native animated draft streaming (sendMessageDraft),
         #     which is smooth, so streaming is on by default there.
-        #   - Discord/Slack/etc. only have edit-based streaming (repeated
+        #   - Discord and Slack only have edit-based streaming (repeated
         #     editMessage), which flickers and is noticeably jankier, so
-        #     streaming is off by default there.
+        #     streaming is off by default for both.
         # These are gap-fillers: a user who explicitly sets, e.g.,
         # display.platforms.discord.streaming: true keeps their value
         # (config deep-merge has user values win over defaults). The global
@@ -1985,6 +2025,7 @@ DEFAULT_CONFIG = {
         "platforms": {
             "telegram": {"streaming": True},
             "discord": {"streaming": False},
+            "slack": {"streaming": False},
         },
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
@@ -2399,6 +2440,16 @@ DEFAULT_CONFIG = {
         # override the output directory.
         "save_traces": False,
         "trace_dir": "",
+        # Privacy redaction filter for advisor (reference) outputs. Advisors
+        # can echo PII from the conversation (emails, formatted phone numbers)
+        # and credential shapes into reference blocks, traces, and the
+        # aggregator prompt. Modes ('' = off, the default):
+        #   "display" — redact user-visible surfaces only (reference blocks
+        #               shown in the UI + saved MoA trace records); the
+        #               aggregator still sees raw advisor text.
+        #   "full"    — additionally redact the advisor text injected into
+        #               the aggregator prompt (issue #59959).
+        "privacy_filter": "",
         "presets": {
             "default": {
                 "reference_models": [
@@ -3175,6 +3226,15 @@ DEFAULT_CONFIG = {
         # How many days of ended-session history to keep.  Matches the
         # default of ``hermes sessions prune``.
         "retention_days": 90,
+        # When true, auto-archive (soft-hide, never delete) sessions that
+        # haven't been touched in ``auto_archive_days`` days, once per
+        # (roughly) min_interval_hours.  "Touched" is last activity, not
+        # creation, so an old-but-recently-used session is spared.  Pinned
+        # sessions are always exempt.  Off by default — opt in explicitly.
+        "auto_archive": False,
+        # Idle threshold (days of no activity) before auto-archive hides a
+        # session.  Only applies when auto_archive is true.
+        "auto_archive_days": 3,
         # VACUUM after a prune that actually deleted rows.  SQLite does not
         # reclaim disk space on DELETE — freed pages are just reused on
         # subsequent INSERTs — so without VACUUM the file stays bloated
@@ -5771,7 +5831,174 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 f"Move '{key}' under the appropriate section",
             ))
 
+    # ── providers: section (dict) — validate structure and detect conflicts ──
+    providers = config.get("providers")
+    if providers is not None and isinstance(providers, dict):
+        for pname, pentry in providers.items():
+            if not isinstance(pentry, dict):
+                issues.append(ConfigIssue(
+                    "error",
+                    f"providers.{pname} should be a dict, got {type(pentry).__name__}",
+                    f"Define {pname} with at minimum: base_url and model fields",
+                ))
+                continue
+            # A providers entry that has a "models" list constrains which
+            # models are selectable — warn if the list is empty or missing
+            # the currently selected model.
+            pmodels = pentry.get("models")
+            if pmodels is not None:
+                if not isinstance(pmodels, list):
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"providers.{pname}.models should be a list, got {type(pmodels).__name__}",
+                        "Change to a YAML list (items prefixed with '-')",
+                    ))
+                elif len(pmodels) == 0:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"providers.{pname}.models is an empty list — no models will be selectable for this provider",
+                        "Add model names to the list or remove the models key to allow all models",
+                    ))
+
+    # ── Dual storage conflict: same provider name in both providers: and custom_providers: ──
+    if isinstance(providers, dict) and isinstance(cp, list):
+        provider_names = {k.lower() for k in providers}
+        for entry in cp:
+            if isinstance(entry, dict):
+                cp_name = (entry.get("name") or "").lower()
+                if cp_name and cp_name in provider_names:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"Provider '{entry.get('name')}' appears in both 'providers:' and 'custom_providers:' with potentially different configs — this can cause CLI/GUI mismatch",
+                        "Remove the duplicate from one section or ensure both entries have identical settings",
+                    ))
+
+    # ── fallback_providers: validate that referenced providers actually exist ──
+    fallback_providers = config.get("fallback_providers")
+    if isinstance(fallback_providers, list):
+        # Build the set of all known provider identifiers
+        known_provider_ids = _collect_known_provider_ids(config)
+        for i, entry in enumerate(fallback_providers):
+            if not isinstance(entry, dict):
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"fallback_providers[{i}] should be a dict, got {type(entry).__name__}",
+                    "Each entry needs at minimum: provider",
+                ))
+                continue
+            fb_provider = (entry.get("provider") or "").strip()
+            if not fb_provider:
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"fallback_providers[{i}] is missing 'provider' field",
+                    "Add: provider: <provider-name>",
+                ))
+                continue
+            # Resolve through aliases and check against known providers
+            canonical = _normalize_provider_name(fb_provider)
+            if canonical not in known_provider_ids:
+                issues.append(ConfigIssue(
+                    "error",
+                    f"fallback_providers[{i}] references provider '{fb_provider}' which has no config entry — fallback will fail silently",
+                    f"Add a '{fb_provider}' entry to 'providers:' or 'custom_providers:', or remove this fallback entry",
+                ))
+
+    # ── Auxiliary task slots: validate provider references ──
+    auxiliary = config.get("auxiliary")
+    if isinstance(auxiliary, dict):
+        known_provider_ids = _collect_known_provider_ids(config)
+        for task_name, task_cfg in auxiliary.items():
+            if not isinstance(task_cfg, dict):
+                continue
+            aux_provider = (task_cfg.get("provider") or "").strip()
+            if not aux_provider or aux_provider.lower() == "auto":
+                continue
+            # Resolve through aliases
+            canonical = _normalize_provider_name(aux_provider)
+            if canonical not in known_provider_ids:
+                issues.append(ConfigIssue(
+                    "warning",
+                    f"auxiliary.{task_name}.provider '{aux_provider}' does not match any known provider — this task may silently fail",
+                    f"Check the provider name (e.g. 'custom:sensenova-ds4f' not 'custom:sensenova')",
+                ))
+
+    # ── Legacy curator.auxiliary block (deprecated) ──
+    curator = config.get("curator")
+    if isinstance(curator, dict):
+        curator_aux = curator.get("auxiliary")
+        if isinstance(curator_aux, dict):
+            curator_provider = (curator_aux.get("provider") or "").strip()
+            if curator_provider and curator_provider.lower() != "auto":
+                known_provider_ids = _collect_known_provider_ids(config)
+                canonical = _normalize_provider_name(curator_provider)
+                if canonical not in known_provider_ids:
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"curator.auxiliary.provider '{curator_provider}' does not match any known provider — curator review may silently fail (consider migrating to auxiliary.curator)",
+                        "Check the provider name and consider migrating to auxiliary.curator.{provider,model}",
+                    ))
+
     return issues
+
+
+def _normalize_provider_name(name: str) -> str:
+    """Normalize a provider name through the same alias resolution as the CLI.
+
+    Returns the canonical provider id string.  This is a lightweight
+    reimplementation of ``hermes_cli.providers.normalize_provider`` so
+    config validation doesn't need to import the full provider machinery.
+    """
+    from hermes_cli.providers import normalize_provider as _np
+    return _np(name)
+
+
+def _collect_known_provider_ids(config: Dict[str, Any]) -> Set[str]:
+    """Return the set of all provider identifiers known to this config.
+
+    Covers:
+    - Built-in provider IDs (via providers.py)
+    - ``providers:`` dict keys
+    - ``custom_providers:`` list entries (as ``custom:<name>`` slugs and bare names)
+    - Provider names from model config and fallback chains
+    """
+    ids: Set[str] = set()
+
+    # Built-in providers
+    try:
+        from hermes_cli.providers import ALIASES, HERMES_OVERLAYS
+        for alias, canonical in ALIASES.items():
+            ids.add(alias.lower())
+            ids.add(canonical.lower())
+        for overlay_id in HERMES_OVERLAYS:
+            ids.add(overlay_id.lower())
+        # Also pull in models.dev if available
+        try:
+            from agent.models_dev import PROVIDER_CATALOG
+            for pid in PROVIDER_CATALOG:
+                ids.add(pid.lower())
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # User-defined providers from ``providers:`` dict
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for k in providers:
+            ids.add(k.lower())
+
+    # Custom providers from ``custom_providers:`` list
+    custom_providers = config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        from hermes_cli.providers import custom_provider_slug
+        for entry in custom_providers:
+            if isinstance(entry, dict):
+                name = entry.get("name") or ""
+                if name:
+                    ids.add(name.lower())
+                    ids.add(custom_provider_slug(name).lower())
+
+    return ids
 
 
 def print_config_warnings(config: Optional[Dict[str, Any]] = None) -> None:

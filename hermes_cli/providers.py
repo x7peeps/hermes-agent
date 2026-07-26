@@ -222,6 +222,19 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="bedrock_converse",
         auth_type="aws_sdk",
     ),
+    # Vertex authenticates via OAuth2 (service-account JSON / ADC), not a
+    # static API key or models.dev entry — resolved specially by
+    # agent/vertex_adapter.py, like bedrock's aws_sdk. Without an overlay
+    # entry get_provider("vertex") returns None, which makes
+    # _preserve_provider_with_base_url() in agent/auxiliary_client.py treat
+    # a Vertex MoA slot's resolved (base_url, api_key) pair as an unknown
+    # custom endpoint instead of "vertex" — losing the provider identity
+    # that _refresh_provider_credentials() needs to re-mint an expired
+    # OAuth2 token on a 401.
+    "vertex": HermesOverlay(
+        transport="openai_chat",
+        auth_type="vertex",
+    ),
 }
 
 
@@ -390,6 +403,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "lmstudio": "LM Studio",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
+    "vertex": "Google Vertex AI",
     "ollama-cloud": "Ollama Cloud",
     "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
 }
@@ -833,3 +847,118 @@ def resolve_provider_full(
         pass
 
     return None
+
+
+# -- Unified provider listing (CLI/GUI consistency) ---------------------------
+
+def list_all_providers_unified(
+    user_providers: Optional[Dict[str, Any]] = None,
+    custom_providers: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Return a unified list of all known providers for display in CLI and GUI.
+
+    This merges the three data sources (models.dev catalog + Hermes overlays +
+    user config) into a single list so the CLI picker and Desktop GUI Settings
+    > Provider page always show the same set.
+
+    Each entry is a dict with keys:
+        id, name, source, base_url, transport, is_custom
+
+    Resolution order (dedup by lowercased id):
+      1. ``providers:`` dict entries (user-config override)
+      2. ``custom_providers:`` list entries
+      3. Built-in providers (models.dev + Hermes overlays)
+    """
+    seen: set[str] = set()
+    results: List[Dict[str, Any]] = []
+
+    # 1. User-defined providers from providers: dict
+    if isinstance(user_providers, dict):
+        for pid, pentry in user_providers.items():
+            if not isinstance(pentry, dict):
+                continue
+            key = pid.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            base_url = (
+                pentry.get("api", "")
+                or pentry.get("url", "")
+                or pentry.get("base_url", "")
+            )
+            results.append({
+                "id": pid,
+                "name": pentry.get("name", pid),
+                "source": "user-config",
+                "base_url": base_url,
+                "transport": pentry.get("transport", "openai_chat"),
+                "is_custom": True,
+            })
+
+    # 2. Custom providers from custom_providers: list
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            display_name = entry.get("name", "")
+            if not display_name:
+                continue
+            slug = custom_provider_slug(display_name)
+            key = slug.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "id": slug,
+                "name": display_name,
+                "source": "user-config",
+                "base_url": entry.get("base_url", "") or entry.get("url", "") or "",
+                "transport": "openai_chat",
+                "is_custom": True,
+            })
+
+    # 3. Built-in providers (models.dev + Hermes overlays)
+    # Collect models.dev IDs
+    try:
+        from agent.models_dev import PROVIDER_CATALOG as _md_catalog
+        for mid in _md_catalog:
+            key = mid.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            pdef = get_provider(mid)
+            if pdef:
+                results.append({
+                    "id": pdef.id,
+                    "name": pdef.name,
+                    "source": "models.dev",
+                    "base_url": pdef.base_url,
+                    "transport": pdef.transport,
+                    "is_custom": False,
+                })
+    except Exception:
+        pass
+
+    # Hermes-only overlays not in models.dev
+    try:
+        from agent.models_dev import PROVIDER_CATALOG as _md2
+    except Exception:
+        _md2 = set()
+
+    for oid in HERMES_OVERLAYS:
+        key = oid.lower()
+        if key in seen or oid in _md2:
+            continue
+        seen.add(key)
+        pdef = get_provider(oid)
+        if pdef:
+            results.append({
+                "id": pdef.id,
+                "name": pdef.name,
+                "source": "hermes",
+                "base_url": pdef.base_url,
+                "transport": pdef.transport,
+                "is_custom": False,
+            })
+
+    return results
