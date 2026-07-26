@@ -39,9 +39,11 @@ def _reset():
 class _FakeSession:
     """Minimal cua-driver session stub returning a canned tool result."""
 
-    def __init__(self, out: Dict[str, Any], capabilities: Optional[set] = None):
+    def __init__(self, out: Dict[str, Any], capabilities: Optional[set] = None,
+                 schema_properties: Optional[Dict[str, Dict[str, Any]]] = None):
         self._out = out
         self._caps = capabilities or set()
+        self._schema_props = schema_properties or {}
         self.last_args: Dict[str, Any] = {}
 
     def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0):
@@ -49,7 +51,24 @@ class _FakeSession:
         return self._out
 
     def supports_capability(self, capability: str, tool: Optional[str] = None) -> bool:
-        return capability in self._caps
+        # Primary path: capability-token set.
+        if tool is not None:
+            if capability in self._caps:
+                return True
+        else:
+            if any(capability in c for c in [self._caps]):
+                return True
+        # Fallback: schema-based detection (#67783).
+        if "." in capability and tool is not None:
+            schema_param = capability.split(".", 1)[1]
+            props = self._schema_props.get(tool)
+            if props and schema_param in props:
+                return True
+        return False
+
+    def _has_tool(self, name: str) -> bool:
+        """Stub for cua-driver tools/list discovery."""
+        return name in self._caps  # simplified for tests
 
 
 def _make_backend(session: _FakeSession):
@@ -189,6 +208,26 @@ def test_foreground_refused_on_old_driver():
     assert res.code == "foreground_unsupported"
     # crucially: no tool call was made with a silent background downgrade
     assert sess.last_args == {}
+
+
+def test_foreground_sent_via_schema_detection_090():
+    """cua-driver 0.9.0 no longer advertises ``input.delivery_mode`` as a
+    capability token — it appears in the action's inputSchema.properties.
+    Foreground must still be discovered and accepted. (#67783)"""
+    out = {"isError": False, "data": {}, "structuredContent": {
+        "effect": "unverifiable"}}
+    sess = _FakeSession(
+        out,
+        capabilities=set(),  # no capability token
+        schema_properties={
+            "click": {"delivery_mode": {"type": "string", "enum": ["background", "foreground"]}},
+        },
+    )
+    be = _make_backend(sess)
+    res = be.click(element=1, delivery_mode="foreground")
+    # Should NOT be refused — schema-based detection finds delivery_mode
+    assert res.ok is True or res.code != "foreground_unsupported"
+    assert sess.last_args.get("delivery_mode") == "foreground"
 
 
 def test_bad_delivery_mode_rejected():
