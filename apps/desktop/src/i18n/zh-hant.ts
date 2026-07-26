@@ -129,6 +129,7 @@ export const zhHant = defineLocale({
     errors: {
       elevenLabsNeedsKey: 'ElevenLabs STT 需要 ELEVENLABS_API_KEY。',
       elevenLabsRejectedKey: 'ElevenLabs 拒絕了該 API 金鑰 (401)。',
+      gatewayAuthFailed: '閘道認證失敗 — 請檢查你的 API_SERVER_KEY。',
       methodNotAllowed: '桌面後端拒絕了該請求 (405 Method Not Allowed)。請嘗試重新啟動 Hermes Desktop。',
       microphonePermission: '麥克風權限已被拒絕。',
       openaiRejectedApiKey: 'OpenAI 拒絕了該 API 金鑰。',
@@ -862,6 +863,12 @@ export const zhHant = defineLocale({
       messages: count => `${count} 則訊息`,
       restored: '已還原',
       deleteConfirm: title => `永久刪除「${title}」？此操作無法復原。`,
+      autoArchiveTitle: '自動封存閒置對話',
+      autoArchiveDesc:
+        '自動封存你一段時間未使用的對話。已釘選的對話永遠不會被封存，也不會刪除任何內容——封存的對話會移到這裡。',
+      autoArchiveDaysLabel: '封存前',
+      autoArchiveDaysUnit: '天無活動',
+      autoArchiveFailed: '無法更新自動封存設定',
       defaultDirTitle: '預設專案目錄',
       defaultDirDesc: '新工作階段預設從此資料夾開始，除非您選擇其他目錄。留空則使用您的家目錄。',
       defaultDirUpdated: '預設專案目錄已更新',
@@ -1651,6 +1658,13 @@ export const zhHant = defineLocale({
       ageDay: '天',
       ageHour: '時',
       ageMin: '分'
+    },
+    dateDivider: {
+      today: '今天稍早',
+      yesterday: '昨天',
+      thisWeek: '本週',
+      lastWeek: '上週',
+      thisMonth: '本月'
     }
   },
 

@@ -173,6 +173,7 @@ export interface Translations {
     errors: {
       elevenLabsNeedsKey: string
       elevenLabsRejectedKey: string
+      gatewayAuthFailed: string
       methodNotAllowed: string
       microphonePermission: string
       openaiRejectedApiKey: string
@@ -722,6 +723,11 @@ export interface Translations {
       messages: (count: number) => string
       restored: string
       deleteConfirm: (title: string) => string
+      autoArchiveTitle: string
+      autoArchiveDesc: string
+      autoArchiveDaysLabel: string
+      autoArchiveDaysUnit: string
+      autoArchiveFailed: string
       defaultDirTitle: string
       defaultDirDesc: string
       defaultDirUpdated: string
@@ -1484,6 +1490,13 @@ export interface Translations {
       ageDay: string
       ageHour: string
       ageMin: string
+    }
+    dateDivider: {
+      today: string
+      yesterday: string
+      thisWeek: string
+      lastWeek: string
+      thisMonth: string
     }
   }
 
