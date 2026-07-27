@@ -890,7 +890,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // chat reactivity are subscribed inside ChatRoutesSurface / ChatView.
   const chatRoutesNode = useMemo(
     () => <ChatRoutesSurface actions={actions} maxVoiceRecordingSeconds={voiceMaxRecordingSeconds} />,
-    [actions, voiceMaxRecordingSeconds]
+    // Include pathname so route changes to full-page views (skills/messaging/
+    // artifacts) bust the memo and force the <Routes> tree to reconcile with
+    // the new location.
+    [actions, voiceMaxRecordingSeconds, location.pathname]
   )
 
   const api = useMemo<WiringApi>(
