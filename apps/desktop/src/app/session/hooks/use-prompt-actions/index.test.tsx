@@ -4002,3 +4002,154 @@ describe('usePromptActions stale-closure session routing', () => {
     }
   })
 })
+
+// #72971: When the user switches sessions while a model response is still
+// streaming, a fast submit can capture a stale runtime sessionId from the old
+// session. The drift check misses it when the switch happened before submit
+// started (startSelectedStoredId === nowSelectedStoredId). The pre-submit
+// binding guard catches this by cross-validating the runtime ↔ stored mapping.
+describe('usePromptActions #72971 pre-submit session binding check', () => {
+  const STORED_SESSION_A = 'stored-session-a'
+  const STORED_SESSION_B = 'stored-session-b'
+  const RUNTIME_SESSION_A = 'rt-session-a'
+  const RUNTIME_SESSION_B = 'rt-session-b'
+
+  afterEach(() => {
+    cleanup()
+    setMessages([])
+    $busy.set(false)
+    vi.restoreAllMocks()
+  })
+
+  it('aborts prompt.submit when runtime sessionId does not match the currently selected stored session', async () => {
+    // Simulate: user was viewing session A, switched to session B, but
+    // activeSessionIdRef still points to rt-session-a (the old runtime).
+    // selectedStoredSessionIdRef already points to stored-session-b.
+    // getRuntimeIdForStoredSession(stored-session-b) returns rt-session-b.
+    // The pre-submit guard should detect the mismatch and abort.
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_A }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_B }
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      return {} as never
+    })
+
+    const createBackendSessionForSend = vi.fn(async () => 'rt-new-session')
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={RUNTIME_SESSION_A}
+        activeSessionIdRef={activeSessionIdRef}
+        busyRef={{ current: false }}
+        createBackendSessionForSend={createBackendSessionForSend}
+        getRoutedStoredSessionId={() => STORED_SESSION_B}
+        getRuntimeIdForStoredSession={storedId =>
+          storedId === STORED_SESSION_A ? RUNTIME_SESSION_A : storedId === STORED_SESSION_B ? RUNTIME_SESSION_B : null
+        }
+        getRouteToken={() => '/chat/' + STORED_SESSION_B}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={STORED_SESSION_B}
+      />
+    )
+
+    const result = await handle!.submitText('hello session B')
+
+    // Should abort because runtime session A ≠ expected runtime session B
+    expect(result).toBe(false)
+    // prompt.submit should never be called
+    expect(calls.find(c => c.method === 'prompt.submit')).toBeUndefined()
+    // createBackendSessionForSend should not be called (we have a target stored session)
+    expect(createBackendSessionForSend).not.toHaveBeenCalled()
+  })
+
+  it('allows prompt.submit when runtime sessionId matches the currently selected stored session', async () => {
+    // Normal case: both refs point to the same session, mapping is consistent.
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_B }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_B }
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={RUNTIME_SESSION_B}
+        activeSessionIdRef={activeSessionIdRef}
+        busyRef={{ current: false }}
+        getRoutedStoredSessionId={() => STORED_SESSION_B}
+        getRuntimeIdForStoredSession={storedId =>
+          storedId === STORED_SESSION_B ? RUNTIME_SESSION_B : null
+        }
+        getRouteToken={() => '/chat/' + STORED_SESSION_B}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={STORED_SESSION_B}
+      />
+    )
+
+    const result = await handle!.submitText('hello session B')
+
+    // Should succeed — runtime matches selected stored session
+    expect(result).toBe(true)
+    expect(calls.find(c => c.method === 'prompt.submit' && c.params?.session_id === RUNTIME_SESSION_B)).toBeDefined()
+  })
+
+  it('allows prompt.submit when no stored session is selected (new chat creation)', async () => {
+    // New chat: no selectedStoredSessionId means no binding to validate.
+    // createBackendSessionForSend must re-home activeSessionIdRef like the real
+    // implementation does, or the post-create drift guard aborts.
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      return {} as never
+    })
+
+    const createBackendSessionForSend = vi.fn(async () => {
+      activeSessionIdRef.current = RUNTIME_SESSION_A
+
+      return RUNTIME_SESSION_A
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={null}
+        activeSessionIdRef={activeSessionIdRef}
+        busyRef={{ current: false }}
+        createBackendSessionForSend={createBackendSessionForSend}
+        getRoutedStoredSessionId={() => null}
+        getRuntimeIdForStoredSession={() => null}
+        getRouteToken={() => '/new'}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={null}
+      />
+    )
+
+    const result = await handle!.submitText('start a new chat')
+
+    // Should proceed to create a new session and submit
+    expect(result).toBe(true)
+    expect(createBackendSessionForSend).toHaveBeenCalled()
+    expect(calls.find(c => c.method === 'prompt.submit' && c.params?.session_id === RUNTIME_SESSION_A)).toBeDefined()
+  })
+})

@@ -551,6 +551,27 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // resume the stored session to re-register it, and retry once.
         let submitErr: unknown = null
 
+        // Pre-submit binding check (defense-in-depth for #72971): the resolved
+        // runtime sessionId must still belong to the currently selected stored
+        // session. If the user switched sessions between the async create/resume
+        // above and this point, activeSessionIdRef may still point to the old
+        // runtime while selectedStoredSessionIdRef already points to the new one.
+        // The drift check alone misses this when the switch happened before
+        // submit started (startSelectedStoredId === nowSelectedStoredId), so
+        // we cross-validate the runtime ↔ stored mapping directly.
+        if (sessionId) {
+          const nowSelectedStoredId = selectedStoredSessionIdRef.current
+          const expectedRuntimeId = nowSelectedStoredId ? getRuntimeIdForStoredSession(nowSelectedStoredId) : null
+
+          if (expectedRuntimeId && sessionId !== expectedRuntimeId) {
+            console.warn('[submit-drift-abort]', `runtime:${sessionId}->expected:${expectedRuntimeId}`, {
+              phase: 'pre-submit-binding'
+            })
+
+            return abortForSessionSwitch(sessionId)
+          }
+        }
+
         try {
           await withSessionBusyRetry(() =>
             requestGateway('prompt.submit', submitParams(sessionId), PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
