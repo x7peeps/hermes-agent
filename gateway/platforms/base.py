@@ -4082,7 +4082,9 @@ class BasePlatformAdapter(ABC):
         return ''.join(chars)
 
     @staticmethod
-    def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
+    def extract_media(
+        content: str, *, resend_paths: Optional[set] = None
+    ) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
 
@@ -4101,8 +4103,16 @@ class BasePlatformAdapter(ABC):
         same response is delivered as a document, mirroring the all-or-nothing
         scope of ``[[audio_as_voice]]``.
 
+        The ``[[resend_media:<path>]]`` directive marks a file that should be
+        delivered even if it appeared in prior turns, overriding the session-wide
+        history-dedup guard.  The path is added to the returned media list;
+        callers that pass a ``resend_paths`` set can use it to skip the dedup
+        check for those entries (#73771).
+
         Args:
             content: The response text to scan.
+            resend_paths: Optional set that will be populated with normalized
+                paths found in ``[[resend_media:<path>]]`` directives.
 
         Returns:
             Tuple of (list of (path, is_voice) pairs, cleaned content with tags removed).
@@ -4117,6 +4127,27 @@ class BasePlatformAdapter(ABC):
         # ``content`` for it (so they can still react to it); here we just
         # keep it out of the user-visible cleaned text.
         cleaned = cleaned.replace("[[as_document]]", "")
+
+        # Parse [[resend_media:<path>]] directives — paths here bypass the
+        # history-dedup guard so the user gets their re-sent file (#73771).
+        _RESEND_RE = re.compile(
+            r"\[\[\s*resend_media\s*:\s*(?P<path>[^\]]+?)\s*\]\]",
+            re.IGNORECASE,
+        )
+        for m in _RESEND_RE.finditer(cleaned):
+            raw = m.group("path").strip().strip("`\"'")
+            try:
+                expanded = os.path.expanduser(raw)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            safe = validate_media_delivery_path(expanded)
+            if safe and resend_paths is not None:
+                resend_paths.add(safe)
+            # Also append to the media list so it is delivered even when
+            # the regular MEDIA: tag for this path was deduped.
+            if safe:
+                media.append((safe, has_voice_tag))
+        cleaned = _RESEND_RE.sub("", cleaned)
         
         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
         # and quoted/backticked paths for LLM-formatted outputs. The extension
@@ -4201,9 +4232,17 @@ class BasePlatformAdapter(ABC):
             "MEDIA:" not in text
             and "[[audio_as_voice]]" not in text
             and "[[as_document]]" not in text
+            and "[[resend_media:" not in text
         ):
             return text
         cleaned = _strip_media_tag_directives(text)
+        # Strip [[resend_media:<path>]] directive from display text too.
+        cleaned = re.sub(
+            r"\[\[\s*resend_media\s*:\s*[^\]]+?\s*\]\]",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         return cleaned.rstrip()
 
@@ -5447,21 +5486,37 @@ class BasePlatformAdapter(ABC):
                 # Pre-extract snapshot for the #29346 recovery/invariant below.
                 _response_pre_extract = response
 
-                # Extract MEDIA:<path> tags (from TTS tool) before other processing
-                media_files, response = self.extract_media(response)
+                # Extract MEDIA:<path> tags (from TTS tool) before other processing.
+                # The resend_paths set collects [[resend_media:<path>]] directives
+                # so they can bypass the history-dedup guard (#73771).
+                _resend_paths: set = set()
+                media_files, response = self.extract_media(
+                    response, resend_paths=_resend_paths
+                )
                 media_files = self.filter_media_delivery_paths(media_files)
 
                 # Deduplicate against media already delivered in prior turns.
-                # The model may echo a previous MEDIA: tag or bare file path in
-                # a later response; without this guard the same file is sent
-                # repeatedly.
+                # The model may echo a previous MEDIA: tag in a later response;
+                # without this guard the same file is sent repeatedly.
+                # Paths marked with [[resend_media:<path>]] bypass this guard
+                # so the user's explicit re-send request is honored (#73771).
                 _history_media_paths = self._history_media_paths_for_session(session_key)
                 if _history_media_paths:
-                    media_files = [
-                        (path, is_voice)
-                        for path, is_voice in media_files
-                        if path not in _history_media_paths
-                    ]
+                    _suppressed = []
+                    _kept = []
+                    for path, is_voice in media_files:
+                        if path in _history_media_paths and path not in _resend_paths:
+                            _suppressed.append(path)
+                        else:
+                            _kept.append((path, is_voice))
+                    if _suppressed:
+                        logger.info(
+                            "[%s] media_history_dedup: suppressed %d file(s) "
+                            "(user did not explicitly request re-send): %s",
+                            self.name, len(_suppressed),
+                            ", ".join(_log_safe_path(p) for p in _suppressed[:5]),
+                        )
+                    media_files = _kept
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
@@ -5482,7 +5537,16 @@ class BasePlatformAdapter(ABC):
                     local_files, text_content = self.extract_local_files(text_content)
                     local_files = self.filter_local_delivery_paths(local_files)
                     if _history_media_paths:
-                        local_files = [p for p in local_files if p not in _history_media_paths]
+                        _lf_suppressed = [p for p in local_files
+                                          if p in _history_media_paths and p not in _resend_paths]
+                        if _lf_suppressed:
+                            logger.info(
+                                "[%s] media_history_dedup: suppressed %d local file(s): %s",
+                                self.name, len(_lf_suppressed),
+                                ", ".join(_log_safe_path(p) for p in _lf_suppressed[:5]),
+                            )
+                        local_files = [p for p in local_files
+                                       if p not in _history_media_paths or p in _resend_paths]
                     if local_files:
                         logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
 

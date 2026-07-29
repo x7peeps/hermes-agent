@@ -15856,6 +15856,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the model may echo a previous turn's MEDIA: tag in a later
             # response; without this guard the same file is re-sent.
             if history_media_paths:
+                _suppressed = [p for p, _ in media_files if p in history_media_paths]
+                if _suppressed:
+                    logger.info(
+                        "Post-stream media dedup: suppressed %d file(s): %s",
+                        len(_suppressed),
+                        ", ".join(str(p) for p in _suppressed[:5]),
+                    )
                 media_files = [
                     (path, is_voice)
                     for path, is_voice in media_files
