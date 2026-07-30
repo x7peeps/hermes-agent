@@ -328,3 +328,101 @@ def test_fill_pops_db_persisted_marker_for_durable_rewrite(monkeypatch):
     assert "_db_persisted" not in persisted[-1], (
         "marker must be popped so the next flush re-writes the filled content"
     )
+
+
+def test_empty_response_exhausted_does_not_persist_reasoning_excerpt(monkeypatch):
+    """A delivery-only reasoning excerpt must not be persisted as an assistant message.
+
+    Regression: when ``_turn_exit_reason == "empty_response_exhausted"``, the
+    ``final_response`` is a labeled reasoning excerpt (e.g. "⚠️ The model
+    produced only internal reasoning…") that is for the user's eyes only.
+    Appending it as a persisted assistant message makes future "continue" turns
+    replay the reasoning as if it were a real response, causing empty-response
+    loops.
+
+    The tail is a non-assistant (user) message — the unconditional ``_tail_role``
+    check would have appended the excerpt before this guard.
+    """
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    reasoning_excerpt = "⚠️ The model produced only internal reasoning without emitting a visible response."
+    messages = [
+        {"role": "user", "content": "think step by step"},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=reasoning_excerpt,
+        api_call_count=5,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="think step by step",
+        original_user_message="think step by step",
+        _should_review_memory=False,
+        _turn_exit_reason="empty_response_exhausted",
+    )
+
+    # Guard: the reasoning excerpt must NOT appear as an assistant message
+    # in either the returned transcript or the durable snapshot.
+    assert not any(
+        m.get("role") == "assistant"
+        and reasoning_excerpt in (m.get("content") or "")
+        for m in result["messages"]
+    ), "reasoning excerpt leaked into returned transcript as assistant message"
+
+    persisted = agent.persisted_messages
+    assert persisted is not None
+    assert not any(
+        m.get("role") == "assistant"
+        and reasoning_excerpt in (m.get("content") or "")
+        for m in persisted
+    ), "reasoning excerpt leaked into durable persisted messages"
+
+    # Total assistant messages should not increase — the only assistant message
+    # is whatever was already in the transcript.
+    assert sum(1 for m in result["messages"] if m.get("role") == "assistant") == 0, (
+        "guard created an unexpected assistant message in the transcript"
+    )
+    assert sum(1 for m in persisted if m.get("role") == "assistant") == 0, (
+        "guard created an unexpected assistant message in the persisted store"
+    )
+
+
+def test_empty_response_exhausted_still_persists_under_normal_exit(monkeypatch):
+    """Delivery-only reasoning guard does NOT block normal-turn persistence.
+
+    When ``_turn_exit_reason`` is *not* ``"empty_response_exhausted"``, the
+    ``final_response`` MUST still be appended as an assistant message when the
+    tail is a non-assistant row, preserving the invariant that every delivered
+    response has a closing assistant row in the transcript (#43849/#44100).
+    """
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    messages = [
+        {"role": "user", "content": "do it"},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="Here is your answer.",
+        api_call_count=2,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="do it",
+        original_user_message="do it",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response(finish_reason=stop)",
+    )
+
+    assert result["messages"][-1] == {"role": "assistant", "content": "Here is your answer."}
+    persisted = agent.persisted_messages
+    assert persisted is not None
+    assert persisted[-1] == {"role": "assistant", "content": "Here is your answer."}
