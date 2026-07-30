@@ -30,6 +30,7 @@ class FakeClient:
         self.codex_bin = codex_bin
         self.codex_home = codex_home
         self.requests: list[tuple[str, dict]] = []
+        self.last_thread_start_params: dict = {}
         self.notifications_responses: list[dict] = []
         self.responses: list[tuple[Any, dict]] = []
         self.error_responses: list[tuple[Any, int, str]] = []
@@ -47,6 +48,8 @@ class FakeClient:
 
     def request(self, method: str, params: Optional[dict] = None, timeout: float = 30.0):
         self.requests.append((method, params or {}))
+        if method == "thread/start":
+            self.last_thread_start_params = params or {}
         if self._request_handler is not None:
             return self._request_handler(method, params or {})
         # Sensible defaults for protocol methods used by the session
@@ -1534,6 +1537,31 @@ class TestThreadStartCrossFill:
             s.ensure_started()
 
 
+
+    def test_instructions_passed_in_thread_start(self):
+        """instructions= kwarg flows into thread/start params."""
+        sess = CodexAppServerSession(
+            codex_bin="/bin/true",
+            instructions="You are a helpful assistant.",
+        )
+        sess._client = FakeClient()
+        sess.ensure_started()
+        assert sess._client.last_thread_start_params.get("instructions") == "You are a helpful assistant."
+
+    def test_instructions_omitted_when_not_set(self):
+        """No instructions key when not provided."""
+        sess = CodexAppServerSession(codex_bin="/bin/true")
+        sess._client = FakeClient()
+        sess.ensure_started()
+        assert "instructions" not in sess._client.last_thread_start_params
+
+    def test_empty_instructions_not_sent(self):
+        """Empty string instructions should not produce instructions key."""
+        sess = CodexAppServerSession(codex_bin="/bin/true", instructions="")
+        sess._client = FakeClient()
+        sess.ensure_started()
+        assert "instructions" not in sess._client.last_thread_start_params
+
 class TestHasTurnAbortedMarker:
     """Unit coverage for the marker matcher itself."""
 
@@ -1606,7 +1634,11 @@ class TestClassifyOAuthFailure:
         assert _classify_oauth_failure("", None) is None  # type: ignore[arg-type]
 
     def test_multi_string_search(self):
-        """Hint can come from any of the provided strings."""
+        pass
+
+
+
+class TestClassifyOAuthFailure_2:
         from agent.transports.codex_app_server_session import (
             _classify_oauth_failure,
         )
