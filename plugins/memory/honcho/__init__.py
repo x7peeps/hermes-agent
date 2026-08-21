@@ -706,6 +706,8 @@ class HonchoMemoryProvider(MemoryProvider):
     # underlying facts are stale. Demote these to a labeled "[historical]"
     # block at the end of the section so the model can see the content for
     # context but doesn't quote them as present-tense facts in every turn.
+    # Prefixes stored in mixed case for readability; the matching code
+    # lowercases both sides so [DEBUG-LOG], [Debug-Log], [debug-log] all match.
     _SELF_NARRATION_PREFIXES = (
         "HERMES SAYS:",
         "HERMES SAID:",
@@ -715,6 +717,8 @@ class HonchoMemoryProvider(MemoryProvider):
         "[DEBUG-LOG] ",
         "[SELF-TRACE] ",
     )
+    # Cached lowercase version for O(1) case-insensitive startswith matching.
+    _SELF_NARRATION_PREFIXES_LOWER = tuple(p.lower() for p in _SELF_NARRATION_PREFIXES)
 
     # User-peer observations that *quote* self-narration phrasing ("austin
     # said Hermes said 'Vee'", "austin shared that hermes says X") survive
@@ -793,7 +797,7 @@ class HonchoMemoryProvider(MemoryProvider):
             lower = stripped.lower()
             if any(upper.startswith(prefix) for prefix in cls._IMPERATIVE_LINE_PREFIXES):
                 filtered_injection.append(line)
-            elif any(lower.startswith(prefix) for prefix in cls._SELF_NARRATION_PREFIXES):
+            elif any(lower.startswith(prefix) for prefix in cls._SELF_NARRATION_PREFIXES_LOWER):
                 filtered_historical.append(line)
             elif cls._SELF_NARRATION_PHRASE_RE.search(line):
                 filtered_historical.append(line)
