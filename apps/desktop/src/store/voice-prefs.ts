@@ -1,38 +1,90 @@
 import { atom } from 'nanostores'
 
-import { getHermesConfigRecord, saveHermesConfig } from '@/hermes'
+import { persistBoolean, readKey, storedBoolean } from '@/lib/storage'
 
-// "Read replies aloud" — mirrors the canonical `voice.auto_tts` config key (also
-// in Settings → Voice, honored by the messaging gateway) so the composer toggle
-// and the Settings switch are one source of truth, not two that can disagree.
-export const $autoSpeakReplies = atom<boolean>(false)
+// Desktop read-aloud is local; voice.auto_tts belongs to the messaging gateway.
+const AUTO_SPEAK_KEY = 'hermes.desktop.autoSpeakReplies'
+export const $autoSpeakReplies = atom<boolean>(storedBoolean(AUTO_SPEAK_KEY, false))
+// Desktop-only auto-speak debounce: when on, interim progress is held back and
+// only the final reply of each turn is voiced. Source of truth is config
+// (`voice.tts_conclusion_only`); this atom is a local mirror like $autoSpeakReplies.
+export const $ttsConclusionOnly = atom<boolean>(false)
+export const $ttsConclusionGraceMs = atom<number>(1500)
+// Best-effort persistence must not give config refresh authority again.
+let autoSpeakChosen = readKey(AUTO_SPEAK_KEY) !== null
 
-/** Seed the atom from a loaded config payload (mount / refresh). */
+/** Migrate the legacy value once without editing the backend configuration. */
 export function applyAutoSpeakFromConfig(config: { voice?: { auto_tts?: unknown } | null } | null | undefined) {
-  $autoSpeakReplies.set(Boolean(config?.voice?.auto_tts))
+  if (config != null && !autoSpeakChosen) {
+    void setAutoSpeakReplies(Boolean(config.voice?.auto_tts))
+  }
 }
 
-/**
- * Flip the preference and persist it. Optimistic — the atom updates instantly and
- * reverts if the config write fails. Read-modify-writes the whole record (the
- * same path the Settings page uses; there's no partial-update endpoint).
- */
-export async function setAutoSpeakReplies(enabled: boolean): Promise<void> {
-  const previous = $autoSpeakReplies.get()
+// First configured `voice.stop_phrases` entry — drives the "Say "stop" to end
+// the voice chat" notice shown when a voice conversation starts. `null` means
+// the user disabled stop phrases (`stop_phrases: []`), so no notice is shown.
+// Defaults to "stop" (the backend default) before config loads.
+export const $voiceStopPhrase = atom<string | null>('stop')
 
-  if (previous === enabled) {
+/** Seed the stop-phrase atom from a loaded config payload (mount / refresh). */
+export function applyVoiceStopPhraseFromConfig(
+  config: { voice?: { stop_phrases?: unknown } | null } | null | undefined
+) {
+  const raw = config?.voice?.stop_phrases
+
+  if (raw === undefined) {
+    // Key absent — backend default applies.
+    $voiceStopPhrase.set('stop')
+
     return
   }
 
-  $autoSpeakReplies.set(enabled)
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  const first = list.map(entry => String(entry).trim()).find(entry => entry.length > 0)
 
-  try {
-    const record = await getHermesConfigRecord()
-    const voice = record.voice && typeof record.voice === 'object' ? (record.voice as Record<string, unknown>) : {}
+  $voiceStopPhrase.set(first ?? null)
+}
 
-    await saveHermesConfig({ ...record, voice: { ...voice, auto_tts: enabled } })
-  } catch (error) {
-    $autoSpeakReplies.set(previous)
-    throw error
+// `voice.thinking_sound` — ambient bubble blips while the agent works during a
+// voice conversation (default on, matching the backend default).
+export const $thinkingSoundEnabled = atom<boolean>(true)
+
+/** Seed the thinking-sound gate from a loaded config payload. */
+export function applyThinkingSoundFromConfig(
+  config: { voice?: { thinking_sound?: unknown } | null } | null | undefined
+) {
+  $thinkingSoundEnabled.set(config?.voice?.thinking_sound !== false)
+}
+
+/**
+ * Seed the conclusion-only debounce from a loaded config payload. Config is the
+ * source of truth — flipping the toggle in Settings calls `setConclusionOnly`
+ * which writes back so the next config refresh sees the choice.
+ */
+export function applyConclusionOnlyFromConfig(
+  config: { voice?: { tts_conclusion_only?: unknown; tts_conclusion_grace_ms?: unknown } | null } | null | undefined
+) {
+  $ttsConclusionOnly.set(config?.voice?.tts_conclusion_only === true)
+  const rawGrace = config?.voice?.tts_conclusion_grace_ms
+  if (typeof rawGrace === 'number' && Number.isFinite(rawGrace) && rawGrace >= 0) {
+    $ttsConclusionGraceMs.set(rawGrace)
   }
+}
+
+/** Local setter for the conclusion-only gate. Kept in sync with config writes upstream. */
+export function setTtsConclusionOnly(enabled: boolean) {
+  $ttsConclusionOnly.set(enabled)
+}
+
+/** Local setter for the conclusion-only grace window (ms). */
+export function setTtsConclusionGraceMs(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return
+  $ttsConclusionGraceMs.set(ms)
+}
+
+/** Persist even an unchanged value, so migrating false is also one-time. */
+export async function setAutoSpeakReplies(enabled: boolean): Promise<void> {
+  autoSpeakChosen = true
+  persistBoolean(AUTO_SPEAK_KEY, enabled)
+  $autoSpeakReplies.set(enabled)
 }
