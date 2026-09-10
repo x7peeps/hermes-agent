@@ -752,7 +752,9 @@ export const zh: Translations = {
       voice: {
         recordKey: '语音快捷键',
         maxRecordingSeconds: '最长录音时长',
-        autoTts: '朗读回复'
+        autoTts: '朗读回复',
+        ttsConclusionOnly: '只朗读最终回复',
+        ttsConclusionGraceMs: '最终回复判定窗口 (毫秒)'
       },
       stt: {
         enabled: '语音转文字',
@@ -899,7 +901,9 @@ export const zh: Translations = {
         enabled: '当对话变大时对较早的上下文进行摘要。'
       },
       voice: {
-        autoTts: '自动朗读助手回复。'
+        autoTts: '自动朗读助手回复。',
+        ttsConclusionOnly: '开启后,等待回复流结束后再朗读;中间进度保持静默,只朗读每个回合的最终结论。',
+        ttsConclusionGraceMs: '朗读前的静默窗口 (毫秒)。若中间进度频繁重置计时器,可适当调高。'
       },
       stt: {
         enabled: '启用本地或提供方支持的语音转写。',

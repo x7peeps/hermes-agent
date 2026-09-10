@@ -365,6 +365,14 @@ export interface HermesConfig {
     auto_tts?: boolean
     stop_phrases?: unknown
     thinking_sound?: unknown
+    /**
+     * Desktop-only debounce: when true, auto-TTS suppresses interim progress
+     * and only reads aloud after `tts_conclusion_grace_ms` of stream quiet.
+     * Defaults to false (today's behavior).
+     */
+    tts_conclusion_only?: boolean
+    /** Quiet window (ms) before the conclusion is spoken. Resets on each interim chunk. */
+    tts_conclusion_grace_ms?: number
   }
 }
 
