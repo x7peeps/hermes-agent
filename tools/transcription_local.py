@@ -8,6 +8,7 @@ stay in ``transcription_tools`` (module state) and are read from it lazily.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import platform
@@ -133,8 +134,43 @@ def _hub_cache_miss_error() -> type:
     return LocalEntryNotFoundError
 
 
-def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
-    """Use a cached model without contacting the Hub, downloading only on a cache miss."""
+_HF_MIRROR_KEYS = ("hf_mirror", "hf_endpoint", "mirror")
+"""Config keys (under ``stt.local``) that pin a Hugging Face mirror to retry after the
+primary Hub fails. ``hf_mirror`` is the new, explicit knob; ``hf_endpoint`` / ``mirror`` are
+accepted as aliases for backward compatibility with existing user configs. Empty / unset
+values disable the auto-retry path entirely (preserves historical behaviour)."""
+
+
+def _resolve_hf_mirror(local_cfg: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Return a usable HF mirror URL, or None when no mirror is configured.
+
+    Resolution order: explicit ``stt.local.<key>`` config > ``HF_ENDPOINT`` environment
+    variable. Returns the URL with any trailing slash stripped so we can concatenate it
+    cleanly into the user-facing error message; returns None when neither source is set
+    so callers can keep the historical "no auto-retry" code path.
+    """
+    if local_cfg:
+        if isinstance(local_cfg, dict):
+            for key in _HF_MIRROR_KEYS:
+                value = local_cfg.get(key)
+                if isinstance(value, str):
+                    stripped = value.strip().rstrip("/")
+                    if stripped:
+                        return stripped
+    env_value = os.environ.get("HF_ENDPOINT", "").strip().rstrip("/")
+    return env_value or None
+
+
+def _create_whisper_model(model_name: str, *, device: str, compute_type: str,
+                          local_cfg: Optional[Dict[str, Any]] = None):
+    """Use a cached model without contacting the Hub, downloading only on a cache miss.
+
+    When a mirror is configured (``stt.local.hf_mirror`` / ``stt.local.hf_endpoint`` /
+    ``stt.local.mirror`` or the ``HF_ENDPOINT`` env var) and the primary Hub download
+    fails with a network error (``OSError``), retry the download against the mirror
+    before raising. Mirror configuration is opt-in: with no mirror configured the
+    behaviour is identical to the pre-PR code path (one attempt, error if it fails).
+    """
     from faster_whisper import WhisperModel
 
     kwargs = {"device": device, "compute_type": compute_type}
@@ -147,20 +183,62 @@ def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
             raise
         logger.info("faster-whisper model '%s' is not cached; downloading it from the Hugging Face Hub", model_name)
 
+    mirror = _resolve_hf_mirror(local_cfg)
     # huggingface_hub surfaces every Hub/network failure as an OSError subclass
     # (LocalEntryNotFoundError wrapping the ConnectTimeout, HfHubHTTPError). Anything else
     # (CUDA runtime, invalid model size) is not a download problem and propagates untouched.
     try:
         return WhisperModel(model_name, local_files_only=False, **kwargs)
     except OSError as exc:
-        raise RuntimeError(
-            f"Unable to download faster-whisper model '{model_name}': {exc}. "
-            "If huggingface.co is unreachable, set HF_ENDPOINT to an accessible mirror; "
-            "when using a mirror with hf-xet installed, also set HF_HUB_DISABLE_XET=1."
-        ) from exc
+        if mirror is None:
+            raise RuntimeError(
+                f"Unable to download faster-whisper model '{model_name}' from the "
+                "Hugging Face Hub: {exc}. To retry against a mirror, set "
+                "`stt.local.hf_mirror` (or the `HF_ENDPOINT` env var) to an accessible "
+                "mirror URL; when using a mirror with hf-xet installed, also set "
+                "HF_HUB_DISABLE_XET=1.".format(exc=exc)
+            ) from exc
+        logger.warning(
+            "faster-whisper Hub download for '%s' failed (%s); retrying against mirror %s",
+            model_name, exc, mirror,
+        )
+        with _with_hf_endpoint(mirror):
+            try:
+                return WhisperModel(model_name, local_files_only=False, **kwargs)
+            except OSError as mirror_exc:
+                raise RuntimeError(
+                    f"Unable to download faster-whisper model '{model_name}' from "
+                    f"either the primary Hub ({exc}) or the configured mirror "
+                    f"'{mirror}' ({mirror_exc}). Verify the mirror URL is reachable "
+                    "and that the mirror carries the model; if the mirror uses hf-xet, "
+                    "also set HF_HUB_DISABLE_XET=1."
+                ) from mirror_exc
 
 
-def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto"):
+@contextlib.contextmanager
+def _with_hf_endpoint(mirror: str):
+    """Swap ``HF_ENDPOINT`` for the duration of the block, restoring the prior value.
+
+    ``HF_ENDPOINT`` is read by ``huggingface_hub`` at call time (not import time), so
+    a temporary env-var swap is enough to redirect a single download attempt to a
+    mirror without touching the user's shell environment. The swap is process-global
+    inside the block — callers must serialise concurrent mirror downloads if they
+    ever fan out, which faster-whisper's single-``WhisperModel`` call does not.
+    """
+    sentinel = object()
+    previous = os.environ.get("HF_ENDPOINT", sentinel)
+    os.environ["HF_ENDPOINT"] = mirror
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            os.environ.pop("HF_ENDPOINT", None)
+        else:
+            os.environ["HF_ENDPOINT"] = previous
+
+
+def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto",
+                              local_cfg: Optional[Dict[str, Any]] = None):
     """Load faster-whisper with graceful CUDA → CPU fallback. ``device="auto"`` picks CUDA
     whenever the ctranslate2 wheel ships CUDA libs, even on hosts without the NVIDIA runtime (WSL2,
     headless servers): try the requested config first; on a CUDA library load failure fall back to
@@ -168,6 +246,12 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
 
     ``device`` / ``compute_type`` default to ``"auto"`` so the historical behaviour is unchanged; pass
     explicit values from ``stt.local.device`` / ``stt.local.compute_type`` to pin a configuration (#9088).
+
+    ``local_cfg`` is the resolved ``stt.local`` config dict; it is forwarded to the mirror-fallback
+    resolver so an explicit ``stt.local.hf_mirror`` (or one of its alias keys) is honoured on
+    download failure. When ``None`` (the default), only the ``HF_ENDPOINT`` environment variable
+    can enable the mirror path — preserves the pre-PR behaviour for any caller that has not yet
+    been wired to forward the config.
     """
     force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
@@ -177,15 +261,15 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
     if force_cpu:
         logger.info("Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
                     "(int8) to avoid native device autodetection crashes")
-        return _create_whisper_model(model_name, device="cpu", compute_type="int8")
+        return _create_whisper_model(model_name, device="cpu", compute_type="int8", local_cfg=local_cfg)
     try:
-        return _create_whisper_model(model_name, device=device, compute_type=compute_type)
+        return _create_whisper_model(model_name, device=device, compute_type=compute_type, local_cfg=local_cfg)
     except Exception as exc:
         if not _looks_like_cuda_lib_error(exc):
             raise
         logger.warning("faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
                        "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.", exc)
-        return _create_whisper_model(model_name, device="cpu", compute_type="int8")
+        return _create_whisper_model(model_name, device="cpu", compute_type="int8", local_cfg=local_cfg)
 
 
 # Silence-hallucination hardening for local faster-whisper (whisper decodes junk like
