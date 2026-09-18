@@ -401,8 +401,14 @@ class TestLocalModelLoading:
         )
 
     @pytest.mark.parametrize("download_error", [None, "Got: ConnectTimeout: [Errno 110] Connection timed out"])
-    def test_cache_miss_falls_back_with_actionable_download_failure(self, download_error):
+    def test_cache_miss_falls_back_with_actionable_download_failure(self, download_error, monkeypatch):
         from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error
+
+        # No mirror in this test — both env and config must be empty so we exercise the
+        # historical "one attempt, error if it fails" code path. ``HF_ENDPOINT`` is
+        # process-global, so unset it explicitly (some test environments set it for
+        # outbound mirror use); the same goes for ``HF_HUB_DISABLE_XET``.
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
 
         LocalEntryNotFoundError = _hub_cache_miss_error()
         if download_error:
@@ -417,6 +423,7 @@ class TestLocalModelLoading:
                     _create_whisper_model("base", device="auto", compute_type="auto")
                 assert "HF_ENDPOINT" in str(exc_info.value)
                 assert "HF_HUB_DISABLE_XET=1" in str(exc_info.value)
+                assert "stt.local.hf_mirror" in str(exc_info.value)
             else:
                 assert _create_whisper_model(
                     "base", device="auto", compute_type="auto"
@@ -427,11 +434,13 @@ class TestLocalModelLoading:
             call("base", local_files_only=False, device="auto", compute_type="auto"),
         ]
 
-    def test_partial_cache_is_treated_as_a_cache_miss(self):
+    def test_partial_cache_is_treated_as_a_cache_miss(self, monkeypatch):
         # An interrupted first download leaves refs/main + a snapshot without model.bin;
         # snapshot_download(local_files_only=True) returns that folder and ctranslate2
         # raises RuntimeError, so the online path must still run.
         from tools.transcription_local import _create_whisper_model
+
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
 
         downloaded_model = object()
         side_effect = [RuntimeError("Unable to open file 'model.bin' in model '/cache/snap'"), downloaded_model]
@@ -439,6 +448,176 @@ class TestLocalModelLoading:
             assert _create_whisper_model("base", device="cpu", compute_type="int8") is downloaded_model
 
         assert [c.kwargs["local_files_only"] for c in model_cls.call_args_list] == [True, False]
+
+
+class TestHfMirrorAutoFallback:
+    """Regression coverage for the ``stt.local.hf_mirror`` auto-fallback path.
+
+    The hub retry path is opt-in: with no mirror configured (and no ``HF_ENDPOINT``
+    env var) behaviour is unchanged. These tests exercise only the opt-in branch.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_mirror_env(self, monkeypatch):
+        # ``HF_ENDPOINT`` is process-global; some test environments set it for unrelated
+        # reasons. Each test that exercises the mirror path sets its own value, so clear
+        # it before every test in this class to keep behaviour deterministic.
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
+
+    def test_mirror_config_retries_after_hub_failure(self, monkeypatch):
+        from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error
+
+        LocalEntryNotFoundError = _hub_cache_miss_error()
+        mirror_model = object()
+        # First call = primary Hub fails (cache miss path), second call = mirror download succeeds.
+        side_effect = [
+            LocalEntryNotFoundError("not cached"),
+            LocalEntryNotFoundError("Got: ConnectTimeout: [Errno 110] Connection timed out"),
+            mirror_model,
+        ]
+        with patch("faster_whisper.WhisperModel", side_effect=side_effect) as model_cls:
+            result = _create_whisper_model(
+                "base", device="auto", compute_type="auto",
+                local_cfg={"hf_mirror": "https://hf-mirror.com"},
+            )
+
+        assert result is mirror_model
+        assert model_cls.call_args_list == [
+            call("base", local_files_only=True, device="auto", compute_type="auto"),
+            call("base", local_files_only=False, device="auto", compute_type="auto"),
+            call("base", local_files_only=False, device="auto", compute_type="auto"),
+        ]
+
+    def test_hf_endpoint_env_used_when_no_config_mirror(self, monkeypatch):
+        from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error
+
+        monkeypatch.setenv("HF_ENDPOINT", "https://mirror.example.com")
+        LocalEntryNotFoundError = _hub_cache_miss_error()
+        mirror_model = object()
+        side_effect = [
+            LocalEntryNotFoundError("not cached"),
+            LocalEntryNotFoundError("ConnectTimeout"),
+            mirror_model,
+        ]
+        with patch("faster_whisper.WhisperModel", side_effect=side_effect) as model_cls:
+            assert _create_whisper_model(
+                "base", device="auto", compute_type="auto",
+            ) is mirror_model
+
+        # Third call (mirror retry) must observe the env-set HF_ENDPOINT; first two don't care.
+        assert model_cls.call_args_list[2] == call(
+            "base", local_files_only=False, device="auto", compute_type="auto"
+        )
+
+    def test_both_hub_and_mirror_fail_raises_combined_error(self, monkeypatch):
+        from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error
+
+        LocalEntryNotFoundError = _hub_cache_miss_error()
+        # Three calls: cache miss, hub fail, mirror fail.
+        side_effect = [
+            LocalEntryNotFoundError("not cached"),
+            LocalEntryNotFoundError("hub: ConnectTimeout"),
+            LocalEntryNotFoundError("mirror: 503 Service Unavailable"),
+        ]
+        with patch("faster_whisper.WhisperModel", side_effect=side_effect) as model_cls:
+            with pytest.raises(RuntimeError) as exc_info:
+                _create_whisper_model(
+                    "base", device="auto", compute_type="auto",
+                    local_cfg={"hf_mirror": "https://broken.example.com"},
+                )
+
+        message = str(exc_info.value)
+        assert "primary Hub" in message
+        assert "https://broken.example.com" in message
+        assert "HF_HUB_DISABLE_XET=1" in message
+
+    def test_no_mirror_keeps_historical_single_attempt(self, monkeypatch):
+        """No mirror in config and no ``HF_ENDPOINT`` env → exactly two WhisperModel calls.
+
+        This is the contractual preservation of behaviour for any user that has not
+        opted into the mirror-fallback feature.
+        """
+        from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error
+
+        LocalEntryNotFoundError = _hub_cache_miss_error()
+        side_effect = [
+            LocalEntryNotFoundError("not cached"),
+            LocalEntryNotFoundError("ConnectTimeout"),
+        ]
+        with patch("faster_whisper.WhisperModel", side_effect=side_effect) as model_cls:
+            with pytest.raises(RuntimeError) as exc_info:
+                _create_whisper_model("base", device="auto", compute_type="auto")
+
+        assert len(model_cls.call_args_list) == 2
+        assert "stt.local.hf_mirror" in str(exc_info.value)
+
+    def test_mirror_endpoint_trailing_slash_is_stripped(self, monkeypatch):
+        """``hf_mirror: 'https://mirror.example.com/'`` and ``hf_endpoint: '.../'`` both
+        yield the same canonical URL the env-var resolver would."""
+        from tools.transcription_local import _resolve_hf_mirror
+
+        assert _resolve_hf_mirror({"hf_mirror": "https://mirror.example.com/"}) == "https://mirror.example.com"
+        assert _resolve_hf_mirror({"hf_endpoint": "  https://mirror.example.com/  "}) == "https://mirror.example.com"
+        monkeypatch.setenv("HF_ENDPOINT", "https://env.example.com//")
+        assert _resolve_hf_mirror() == "https://env.example.com"
+
+    def test_mirror_resolution_order_prefers_config_over_env(self, monkeypatch):
+        from tools.transcription_local import _resolve_hf_mirror
+
+        monkeypatch.setenv("HF_ENDPOINT", "https://env.example.com")
+        assert _resolve_hf_mirror({"hf_mirror": "https://config.example.com"}) == "https://config.example.com"
+
+    def test_alias_keys_are_accepted(self, monkeypatch):
+        """``hf_endpoint`` and ``mirror`` keys exist in the wild; both must resolve."""
+        from tools.transcription_local import _resolve_hf_mirror
+
+        assert _resolve_hf_mirror({"hf_endpoint": "https://a.example.com"}) == "https://a.example.com"
+        assert _resolve_hf_mirror({"mirror": "https://b.example.com"}) == "https://b.example.com"
+        # Empty / whitespace values fall through to env or None.
+        monkeypatch.setenv("HF_ENDPOINT", "https://env.example.com")
+        assert _resolve_hf_mirror({"hf_mirror": "  "}) == "https://env.example.com"
+
+    def test_mirror_env_is_restored_after_failure(self, monkeypatch):
+        from tools.transcription_local import _create_whisper_model, _hub_cache_miss_error, _with_hf_endpoint
+
+        LocalEntryNotFoundError = _hub_cache_miss_error()
+        side_effect = [
+            LocalEntryNotFoundError("not cached"),
+            LocalEntryNotFoundError("hub fail"),
+            LocalEntryNotFoundError("mirror fail"),
+        ]
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
+        with patch("faster_whisper.WhisperModel", side_effect=side_effect):
+            with pytest.raises(RuntimeError):
+                _create_whisper_model(
+                    "base", device="auto", compute_type="auto",
+                    local_cfg={"hf_mirror": "https://mirror.example.com"},
+                )
+        assert "HF_ENDPOINT" not in os.environ
+
+        # When ``HF_ENDPOINT`` was set before the call, it must be restored verbatim
+        # (no mutation, no stripping) so concurrent code that reads it sees the same value.
+        monkeypatch.setenv("HF_ENDPOINT", "https://user.example.com")
+        with patch("faster_whisper.WhisperModel",
+                   side_effect=[LocalEntryNotFoundError("not cached"), LocalEntryNotFoundError("x"),
+                                LocalEntryNotFoundError("y")]):
+            with pytest.raises(RuntimeError):
+                _create_whisper_model("base", device="auto", compute_type="auto",
+                                      local_cfg={"hf_mirror": "https://mirror.example.com"})
+        assert os.environ["HF_ENDPOINT"] == "https://user.example.com"
+
+    def test_with_hf_endpoint_yields_and_restores(self):
+        from tools.transcription_local import _with_hf_endpoint
+
+        with _with_hf_endpoint("https://inside.example.com"):
+            assert os.environ["HF_ENDPOINT"] == "https://inside.example.com"
+        assert "HF_ENDPOINT" not in os.environ
+
+        os.environ["HF_ENDPOINT"] = "https://outer.example.com"
+        with _with_hf_endpoint("https://inside.example.com"):
+            assert os.environ["HF_ENDPOINT"] == "https://inside.example.com"
+        assert os.environ["HF_ENDPOINT"] == "https://outer.example.com"
+        del os.environ["HF_ENDPOINT"]
 
 
 @pytest.mark.skipif(
@@ -1210,7 +1389,7 @@ class TestLocalModelLock:
         load_count = 0
         load_started = threading.Event()
 
-        def slow_load(model_name, device="auto", compute_type="auto"):
+        def slow_load(model_name, device="auto", compute_type="auto", local_cfg=None):
             nonlocal load_count
             load_count += 1
             load_started.set()

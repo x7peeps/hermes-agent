@@ -321,7 +321,8 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
                 logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
                 # stt.local.device / compute_type pin a configuration where ``auto`` mis-detects.
                 _local_model = _load_local_whisper_model(model_name, device=local_cfg.get("device", "auto"),
-                                                         compute_type=local_cfg.get("compute_type", "auto"))
+                                                         compute_type=local_cfg.get("compute_type", "auto"),
+                                                         local_cfg=local_cfg)
                 _local_model_name = model_name
             model = _local_model
     return model
@@ -330,7 +331,11 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
 def _replace_cached_model_on_cpu(model_name: str):
     """Load *model_name* on CPU/int8 and make it the cached singleton."""
     global _local_model, _local_model_name
-    model = _load_local_whisper_model(model_name, device="cpu", compute_type="int8")
+    # No mirror fallback for the implicit CPU swap — that path only fires after a CUDA load
+    # failure and the user has already had a chance to configure ``stt.local`` for the original
+    # load. Reading the live config keeps parity with the primary load path's mirror resolution.
+    cpu_local_cfg = _load_stt_config().get("local") or {}
+    model = _load_local_whisper_model(model_name, device="cpu", compute_type="int8", local_cfg=cpu_local_cfg)
     with _local_model_lock:
         _local_model, _local_model_name = model, model_name
     return model
