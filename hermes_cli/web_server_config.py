@@ -125,8 +125,9 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
         "edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper",
     ),
     "stt.provider": _select(
-        "Speech-to-text provider", "local", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"),
+        "Speech-to-text provider", "local", "mlx", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"),
     "stt.local.model": _select("Local faster-whisper model size", *STT_MODEL_CATALOG["local"]),
+    "stt.mlx.model": _select("Local MLX speech-to-text model", *STT_MODEL_CATALOG["mlx"]),
     "stt.groq.model": _select("Groq Whisper model", *STT_MODEL_CATALOG["groq"]),
     "stt.openai.model": _select("OpenAI transcription model", *STT_MODEL_CATALOG["openai"]),
     "stt.openai.streaming_model": _select("OpenAI live transcription model (stt.streaming)", "gpt-live-transcribe",

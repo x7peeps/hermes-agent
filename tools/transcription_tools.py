@@ -24,13 +24,15 @@ from typing import Optional, Dict, Any
 from utils import is_truthy_value
 from tools.transcription_common import (
     BUILTIN_STT_PROVIDERS, CLOUD_STT_PROVIDERS, DEFAULT_ELEVENLABS_STT_MODEL,
-    DEFAULT_GROQ_STT_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MISTRAL_STT_MODEL, DEFAULT_PROVIDER,
+    DEFAULT_GROQ_STT_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MISTRAL_STT_MODEL,
+    DEFAULT_MLX_STT_MODEL, DEFAULT_PROVIDER,
     DEFAULT_STT_MODEL, LOCAL_STT_COMMAND_ENV, LOCAL_STT_LANGUAGE_ENV,
     normalize_xai_stt_model, _error_result, _get_stt_section, _ok_result)
 from tools.transcription_audio import (
     _convert_caf_to_wav, _prepare_audio_for_transcription, _trim_silence_for_cloud_stt,
     _validate_audio_file, _validate_audio_source_file)
 from tools.transcription_chunking import exceeds_upload_limit, transcribe_oversized, upload_limit
+from tools.transcription_mlx import transcribe_mlx
 from tools.transcription_local import (
     _get_idle_unload_seconds, _has_local_command, _join_confident_segments,
     _load_local_whisper_model, _looks_like_cuda_lib_error, _normalize_local_model,
@@ -132,7 +134,7 @@ def _has_openai_audio_backend() -> bool:
 
 def _is_local_stt_provider(provider: str, stt_config: dict[str, Any]) -> bool:
     """Whether *provider* is exempt from Hermes's remote upload cap."""
-    return (provider or "").lower().strip() in {"local", "local_command"}
+    return (provider or "").lower().strip() in {"local", "local_command", "mlx"}
 
 
 # ---- Provider resolution ------------------------------------------------
@@ -365,6 +367,13 @@ def _replace_cached_model_on_cpu(model_name: str):
     return model
 
 
+def _transcribe_mlx(
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
+) -> dict[str, Any]:
+    """Transcribe using the local MLX runtime (Apple Silicon). GPU-accelerated and fully offline."""
+    return transcribe_mlx(file_path, model_name, language=language, prompt=prompt)
+
+
 def _transcribe_local(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> dict[str, Any]:
@@ -483,7 +492,8 @@ _BUILTIN_MODEL_KEYS = {
     "mistral": ("mistral", "model", DEFAULT_MISTRAL_STT_MODEL, False),
     "xai": ("xai", "model", "", True),  # blank -> normalize_xai_stt_model resolves env/default
     "elevenlabs": ("elevenlabs", "model_id", DEFAULT_ELEVENLABS_STT_MODEL, False),
-    "deepinfra": ("deepinfra", "model", "", True)}
+    "deepinfra": ("deepinfra", "model", "", True),
+    "mlx": ("mlx", "model", DEFAULT_MLX_STT_MODEL, False)}
 
 
 def _builtin_model_name(provider: str, stt_config: dict[str, Any], model: Optional[str]) -> str:

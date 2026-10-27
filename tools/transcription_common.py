@@ -50,7 +50,8 @@ STT_MODEL_CATALOG = {
     "openai": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
     "mistral": ["voxtral-mini-latest", "voxtral-mini-2602"],
     "xai": ["grok-voice-transcribe-2.0", "grok-voice-transcribe-1.0"],
-    "elevenlabs": ["scribe_v2", "scribe_v1"]}
+    "elevenlabs": ["scribe_v2", "scribe_v1"],
+    "mlx": ["mlx-community/whisper-large-v3-turbo", "mlx-community/Ming-3.0-asr-tiny-4bit"]}
 # ElevenLabs historically uses ``model_id`` instead of ``model``.
 STT_MODEL_CONFIG_KEY = {"elevenlabs": "model_id"}
 
@@ -65,10 +66,15 @@ RETIRED_GROQ_MODELS = frozenset({"distil-whisper-large-v3-en"})
 # dispatcher short-circuits them before command/plugin lookup.
 # The plugin hook from issue #30398-style follow-up rejects plugins registering under any of these names;
 # the dispatcher in ``transcribe_audio`` short-circuits them defensively as well.
+# Default MLX speech-to-text checkpoint. Apple Silicon only; runs fully offline.
+DEFAULT_MLX_STT_MODEL = "mlx-community/whisper-large-v3-turbo"
+
 BUILTIN_STT_PROVIDERS = frozenset({
-    "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"})
+    "local", "local_command", "mlx", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"})
 # Built-in providers that upload audio to a remote API.
-CLOUD_STT_PROVIDERS = frozenset(BUILTIN_STT_PROVIDERS - {"local", "local_command"})
+# Providers that run on-device and never upload audio.
+LOCAL_STT_PROVIDERS = frozenset({"local", "local_command", "mlx"})
+CLOUD_STT_PROVIDERS = frozenset(BUILTIN_STT_PROVIDERS - LOCAL_STT_PROVIDERS)
 
 
 def _error_result(error: str, **extra: Any) -> dict[str, Any]:

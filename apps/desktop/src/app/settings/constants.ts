@@ -249,9 +249,10 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
   'terminal.backend': ['local', 'docker', 'singularity', 'modal', 'daytona', 'ssh'],
   'stt.elevenlabs.model_id': ['scribe_v2', 'scribe_v1'],
   'stt.local.model': ['tiny', 'base', 'small', 'medium', 'large-v3', 'turbo'],
+  'stt.mlx.model': ['mlx-community/whisper-large-v3-turbo', 'mlx-community/Ming-3.0-asr-tiny-4bit'],
   // Speech-to-text backends — kept in sync with BUILTIN_STT_PROVIDERS in
   // tools/transcription_common.py (local_command is auto-detected, not picked).
-  'stt.provider': ['local', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs', 'deepinfra'],
+  'stt.provider': ['local', 'mlx', 'groq', 'openai', 'mistral', 'xai', 'elevenlabs', 'deepinfra'],
   // How the desktop voice conversation is wired — tools/voice_live.py owns the
   // gpt-live branch (one full-duplex voice model delegating to Hermes).
   'voice.voice_chat_mode': ['chained', 'gpt-live'],
@@ -397,6 +398,7 @@ export const FREE_INPUT_KEYS = new Set([
   'tts.openai.voice',
   'tts.elevenlabs.voice_id',
   'tts.elevenlabs.model_id',
+  'stt.mlx.model',
   'stt.openai.model',
   'stt.groq.model',
   'stt.mistral.model',

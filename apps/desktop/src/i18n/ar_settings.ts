@@ -465,6 +465,7 @@ export const arSettings = {
       'stt.enabled': 'تحويل الكلام إلى نص',
       'stt.provider': 'مزود تحويل الكلام إلى نص',
       'stt.local.model': 'نموذج التفريغ المحلي',
+      'stt.mlx.model': 'نموذج MLX المحلي',
       'stt.local.language': 'لغة التفريغ',
       'stt.openai.model': 'نموذج OpenAI STT',
       'stt.groq.model': 'نموذج Groq STT',

@@ -36,7 +36,8 @@ if "faster_whisper" not in sys.modules:
     faster_whisper_stub.__spec__ = ModuleSpec("faster_whisper", loader=None)
     sys.modules["faster_whisper"] = faster_whisper_stub
 
-from tools.transcription_common import BUILTIN_STT_PROVIDERS, CLOUD_STT_PROVIDERS
+from tools.transcription_common import (
+    BUILTIN_STT_PROVIDERS, CLOUD_STT_PROVIDERS, LOCAL_STT_PROVIDERS)
 from tools.transcription_audio import (
     _cloud_trim_settings,
     _CLOUD_TRIM_KEEP_MS_DEFAULT,
@@ -85,7 +86,12 @@ class TestProviderGating:
     def test_cloud_set_covers_every_remote_builtin(self):
         # Invariant: every built-in that is not local-ish uploads audio and
         # must get the trim. New built-ins are cloud unless proven otherwise.
-        assert CLOUD_STT_PROVIDERS == BUILTIN_STT_PROVIDERS - {"local", "local_command"}
+        assert CLOUD_STT_PROVIDERS == BUILTIN_STT_PROVIDERS - LOCAL_STT_PROVIDERS
+
+    def test_mlx_provider_is_local_not_cloud(self):
+        """MLX runs on-device; it must never be treated as a cloud uploader."""
+        assert "mlx" in LOCAL_STT_PROVIDERS
+        assert "mlx" not in CLOUD_STT_PROVIDERS
 
     def test_local_provider_never_trims(self, tmp_path):
         wav = _write_wav(tmp_path / "a.wav", [("tone", 1)])
