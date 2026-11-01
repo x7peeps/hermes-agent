@@ -7,6 +7,7 @@ import asyncio
 from functools import partial
 import logging
 from pathlib import Path
+import sqlite3
 import time
 
 from agent.turn_author import parse_turn_author
@@ -312,6 +313,34 @@ def _moved_aside_by_this_door(authority, holder, pinned):
     if pinned not in (holder['id'], db.get_compression_tip(holder['id'])):
         return False
     return str((db.get_session(holder['id']) or {}).get('title') or '').startswith('Bot Chat (')
+
+
+def _pinned_names_this_conversation(authority, entry, pinned):
+    """Whether *pinned* and the live *entry* name ONE conversation, though their ids differ.
+
+    A producer pins the id it read from the target's store (``tools.bot_live_delivery``'s
+    ``_bot_chat_tip``: the compression tip of the row titled ``Bot Chat``). A RESET is not a
+    compression step, so after a reset the pin keeps naming the LOGICAL id while the live route
+    entry points at the physical RESET SEGMENT — different ids, one conversation. The door then
+    refused every delivery ``admission_conflict``, forever: the reset never rolls back and the
+    pin never moves, so a recurring job (cron's Bot Chat delivery) could never deliver again.
+
+    ``admission_owner`` is the authority on that identity: it answers the creation id a physical
+    row answers to, through the compression root and then the local reset fork. So a pinned id
+    that IS the live entry's admission owner names the same conversation and is admitted, while a
+    pin naming a DIFFERENT conversation is still refused.
+    """
+    if pinned == entry.session_id:
+        return True
+    from gateway.session_authorities import admission_owner
+    try:
+        return admission_owner(authority, entry.session_id) == pinned
+    except (RuntimeStoreError, sqlite3.Error) as exc:
+        # A missing receipt or an unreadable store is not a licence to admit a foreign chat:
+        # fall back to refusing the delivery (the producer retries on the next beat).
+        logger.warning('Bot Chat delivery: the admission owner of %s is unreadable (%s); '
+                       'the pinned id %s is refused', entry.session_id, exc, pinned, exc_info=True)
+        return False
 
 
 def _displace_bot_chat(db, sid):
@@ -848,7 +877,9 @@ async def _deliver(connection, params):
             holder = authority.db.get_session_by_title('Bot Chat')
             ref, live, entry = await _target(authority, actor)
             pinned = params.get('session_id', entry.session_id)
-            if pinned != entry.session_id and not _moved_aside_by_this_door(authority, holder, pinned):
+            if (pinned != entry.session_id
+                    and not _moved_aside_by_this_door(authority, holder, pinned)
+                    and not _pinned_names_this_conversation(authority, entry, pinned)):
                 raise RuntimeStoreError('admission_conflict')
             return await _admit(authority, actor, home, root, key, message, ref, live, entry, author=author,
                                 notification_category=category)
