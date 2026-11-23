@@ -8,6 +8,15 @@ import { $connectionsRegistry } from '@/store/connection-registry-state'
 import { $profileColors, normalizeProfileKey } from '@/store/profile'
 
 import type { SidebarSessionGroup } from './projects/workspace-groups'
+import { sessionRecency } from './projects/workspace-groups'
+
+/** Most recent session in the group. The fallback sort key for groups the user
+ *  never dragged: an alphabetical rail sinks the profile you are actively
+ *  working in, so the section you just talked to should float to the top.
+ *  A manual drag order still wins — gateway-groups.tsx re-sorts by
+ *  `$gatewayGroupOrder` and only the unlisted groups keep this order. */
+const groupRecency = (group: SidebarSessionGroup): number =>
+  group.sessions.reduce((latest, session) => Math.max(latest, sessionRecency(session)), 0)
 
 /** One group per exact owner `[connectionId, profile]`. Group identity never
  *  depends on a mutable label, URL, or the active gateway. */
@@ -40,7 +49,9 @@ export function buildGatewaySessionGroups(
     groups.set(id, group)
   }
 
-  return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id))
+  return [...groups.values()].sort(
+    (a, b) => groupRecency(b) - groupRecency(a) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id)
+  )
 }
 
 /** Re-key owner groups shown inside another section (a messaging platform) so

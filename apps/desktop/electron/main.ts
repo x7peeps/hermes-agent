@@ -6779,7 +6779,8 @@ function installZoomShortcuts(window) {
 const lastContextMenuPoint = new Map<number, { x: number; y: number }>()
 
 function installContextMenuBridge(window: BrowserWindow) {
-  window.webContents.on('context-menu', (_event, params) => {
+  window.webContents.on('context-menu', (event, params) => {
+    event.preventDefault()
     lastContextMenuPoint.set(window.webContents.id, { x: params.x, y: params.y })
 
     const suggestions = Array.isArray(params.dictionarySuggestions) ? params.dictionarySuggestions : []

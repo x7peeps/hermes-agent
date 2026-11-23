@@ -1199,6 +1199,10 @@ export interface SessionTileWorkspaceScope {
 // set, with runtime bindings dropped so tiles re-resume on their own gateway.
 const TILES_KEY = 'hermes.desktop.sessionTiles.v2'
 const LEGACY_TILES_KEY = 'hermes.desktop.sessionTiles.v1'
+
+/** Cold-launch restore ceiling (see loadTilesByProfile) and its user override. */
+const DEFAULT_RESTORE_TILE_LIMIT = 4
+const RESTORE_TILE_LIMIT_KEY = 'hermes.desktop.restoreTileLimit'
 const BOTS_TILE_BUCKET = '__bots_workspace__'
 
 /** Persisted placement — `dir` + strip slot (`before`) + dock `anchor` so a
@@ -1333,6 +1337,40 @@ function loadTilesByProfile(): Record<string, StoredTile[]> {
     byProfile[BOTS_TILE_BUCKET] = [
       ...new Map(byProfile[BOTS_TILE_BUCKET].map(tile => [tile.storedSessionId, tile])).values()
     ]
+  }
+
+  // Cold-launch restore ceiling.
+  //
+  // Every restored tile mounts a SessionTilePane and resumes its session — one
+  // full transcript fetch each. After a few weeks of daily tabs the persisted
+  // strip grows into the dozens, and launch turns into N transcript loads (the
+  // reported "reopens too many windows and everything is slow"). Keep only the
+  // newest few; the rest stay one click away in the sidebar.
+  //
+  // Override with localStorage `hermes.desktop.restoreTileLimit`:
+  //   0        → restore no tiles (fresh start every launch)
+  //   n > 0    → keep the newest n tiles per profile bucket
+  // Anything unset/unparsable uses the default below.
+  const restoreLimit = (() => {
+    const raw = readJson<unknown>(RESTORE_TILE_LIMIT_KEY)
+
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      return Math.floor(raw)
+    }
+
+    return DEFAULT_RESTORE_TILE_LIMIT
+  })()
+
+  for (const bucket of Object.keys(byProfile)) {
+    const tiles = byProfile[bucket]
+
+    // Bots bucket is the Bot Mode workspace: its tabs are the workspace, not
+    // incidental recents — never trim it (it is bounded by bot count).
+    if (bucket === BOTS_TILE_BUCKET || tiles.length <= restoreLimit) {
+      continue
+    }
+
+    byProfile[bucket] = restoreLimit === 0 ? [] : tiles.slice(-restoreLimit)
   }
 
   writeJson(LEGACY_TILES_KEY, null)
