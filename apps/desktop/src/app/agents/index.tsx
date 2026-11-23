@@ -8,6 +8,7 @@ import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { Codicon } from '@/components/ui/codicon'
 import { FadeText } from '@/components/ui/fade-text'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
+import { StatusPulse } from '@/components/ui/status-pulse'
 import { type Translations, useI18n } from '@/i18n'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
@@ -29,11 +30,13 @@ import { Panel, PanelEmpty, PanelHeader } from '../overlays/panel'
 function statusGlyph(status: SubagentStatus, a: Translations['agents']): ReactNode {
   if (status === 'running' || status === 'queued') {
     return (
-      <GlyphSpinner
-        ariaLabel={a.running}
-        className="size-3.5 shrink-0 text-[0.95rem] text-muted-foreground/80"
-        spinner="breathe"
-      />
+      <span
+        aria-label={a.running}
+        className="relative size-3.5 shrink-0 rounded-full bg-(--ui-accent) shadow-[0_0_0.625rem_color-mix(in_srgb,var(--ui-accent)_55%,transparent)]"
+        role="status"
+      >
+        <StatusPulse aria-hidden="true" className="absolute inset-0 rounded-full bg-(--ui-accent) opacity-0" kind="ping" opacity={0.7} />
+      </span>
     )
   }
 
