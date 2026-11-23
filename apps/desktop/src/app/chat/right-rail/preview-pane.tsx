@@ -1290,6 +1290,7 @@ export function PreviewPane({
     // coordinates; adding the webview rect on top double-counted the offset
     // and dropped the menu far right+below the click.
     const onGuestContextMenu = (event: Event) => {
+      event.preventDefault()
       const detail = event as Event & { params?: GuestContextMenuParams }
       const params = detail.params
 

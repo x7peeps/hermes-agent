@@ -14,6 +14,15 @@ import { $profileColors, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $sessionProfilesFailed, $sessionsLoadError, isSessionProfileUnread } from '@/store/session'
 
 import type { SidebarSessionGroup } from './projects/workspace-groups'
+import { sessionRecency } from './projects/workspace-groups'
+
+/** Most recent session in the group. The fallback sort key for groups the user
+ *  never dragged: an alphabetical rail sinks the profile you are actively
+ *  working in, so the section you just talked to should float to the top.
+ *  A manual drag order still wins — gateway-groups.tsx re-sorts by
+ *  `$gatewayGroupOrder` and only the unlisted groups keep this order. */
+const groupRecency = (group: SidebarSessionGroup): number =>
+  group.sessions.reduce((latest, session) => Math.max(latest, sessionRecency(session)), 0)
 
 /** A gateway section's name: its registry label, else `localLabel` for the `local` source a
  *  registry does not list (the Webapp's one gateway, the host serving it), else the raw id. */
@@ -82,7 +91,9 @@ function ownerGroup(
 }
 
 function sortGroups(groups: SidebarSessionGroup[]): SidebarSessionGroup[] {
-  return groups.sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id))
+  return groups.sort(
+    (a, b) => groupRecency(b) - groupRecency(a) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id)
+  )
 }
 
 /** Re-key owner groups shown inside another section (a messaging platform) so

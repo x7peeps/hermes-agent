@@ -477,6 +477,10 @@ def _iter_darwin_sidecar_holders(db_path) -> list[tuple[int, str]]:
     return holders
 
 
+_DELETED_WAL_SCAN_TTL_S = 30.0
+_deleted_wal_scan_cache: tuple[float, list] = (0.0, [])
+
+
 def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
     """Return processes holding an unlinked ``state.db-wal`` / ``-shm`` sidecar for *db_path*.
 
@@ -488,9 +492,17 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
     generation can exist; any other platform returns ``[]`` as before.
 
     Includes this process: on the open/write refuse path the in-process writer holding the orphan
-    inode must not mint a replacement WAL (``_foreign_state_db_holders`` skips this PID)."""
+    inode must not mint a replacement WAL (``_foreign_state_db_holders`` skips this PID).
+
+    Results are cached per process for :data:`_DELETED_WAL_SCAN_TTL_S` so lock-contention retries
+    and sibling openers do not each re-run the expensive full-fd-table scan (HX-local-2026-11-23).
+    """
+    global _deleted_wal_scan_cache
     if sys.platform == "win32":
         return []
+    now = time.monotonic()
+    if now - _deleted_wal_scan_cache[0] < _DELETED_WAL_SCAN_TTL_S:
+        return list(_deleted_wal_scan_cache[1])
     holders: list[tuple[int, str]] = []
     try:
         if sys.platform == "darwin":
@@ -504,6 +516,7 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
                     holders.append((pid, target))
     except Exception as exc:
         logger.debug("deleted-WAL holder scan failed for %s: %s", db_path, exc)
+    _deleted_wal_scan_cache = (time.monotonic(), holders)
     return holders
 
 

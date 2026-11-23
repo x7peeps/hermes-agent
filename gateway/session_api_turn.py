@@ -178,7 +178,12 @@ def admit_api_steps(adapter, **kwargs):
     # admission otherwise retains its image bytes under native-inputs/ forever).
     existing = store.sessions.get(sid)
     if existing is not None and existing.source not in ('api_server', 'bot_room'):
-        raise AuthorityRefusal('permission_denied')
+        # Allow the API to continue a foreign-source session whose owning
+        # surface has already ended it (ended_at set): no live concurrent
+        # writer remains, so continuation is safe. In-progress sessions
+        # (ended_at NULL) stay refused — the owning surface may still write.
+        if existing.ended_at is None:
+            raise AuthorityRefusal('permission_denied')
     if kwargs.get('turn_author') is not None:
         from agent.turn_author import parse_turn_author
         author = parse_turn_author(kwargs['turn_author'])
