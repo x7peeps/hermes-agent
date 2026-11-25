@@ -77,6 +77,29 @@ def test_hosted_lifecycle_serves_and_stops_every_authority(mux):
     assert all(not s.runtime.status()['running'] for s in services.values())
 
 
+def test_ready_hosted_workers_do_not_rebuild_profile_scopes(mux, monkeypatch):
+    from gateway import session_hosted_service
+    from gateway.run_runtime import recover_gateway_native_sessions
+    from contextlib import contextmanager
+
+    runner, _, _, call = mux
+    call(recover_gateway_native_sessions(runner))
+    entered = []
+    original = session_hosted_service.owner_scope
+
+    @contextmanager
+    def record_scope(authority):
+        entered.append(authority.profile_id)
+        with original(authority):
+            yield
+
+    monkeypatch.setattr(session_hosted_service, 'owner_scope', record_scope)
+    service = call(runner._ensure_hosted_room_worker())
+    assert service is runner.session_authority.hosted_room_service
+    assert service.runtime.status()['running']
+    assert entered == []
+
+
 def test_secondary_owner_transport_routes_both_directions_through_mux(mux):
     from gateway import hosted_rooms
     from gateway.session_authorities import owner_scope

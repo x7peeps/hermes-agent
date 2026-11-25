@@ -107,6 +107,30 @@ def test_multiplexed_credential_chores_run_once_per_profile_in_its_own_scope(two
     assert get_hermes_home() == a
 
 
+def test_retention_stays_out_of_the_startup_window(two_homes, monkeypatch):
+    """Retention must never run while the gateway is still coming up.
+
+    It used to run inside the DB init (blocking the control socket for minutes on a
+    multi-GB store) and then, once moved to the housekeeping thread, on the FIRST
+    tick — the same minute the Desktop is attaching. The sweep now waits for the
+    hourly cadence, offset from the startup window.
+    """
+    from hermes_constants import get_hermes_home
+
+    a, b = two_homes
+    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
+    runner.config = SimpleNamespace(multiplex_profiles=True)
+    monkeypatch.setattr(runner, '_open_session_db_for_active_scope', lambda **kwargs: None)
+    swept = []
+    monkeypatch.setattr(gateway_run, '_housekeeping_state_db_maintenance',
+                        lambda launch: swept.append(get_hermes_home()))
+    runner._init_session_db()
+    assert swept == [], 'retention blocked the control socket during startup'
+    gateway_run._start_gateway_housekeeping(_Ticks(1), interval=0, runner=runner)
+    assert swept == [], 'retention ran in the startup window'
+    gateway_run._start_gateway_housekeeping(_Ticks(31), interval=0, runner=runner)
+    assert swept == [a, b]
+
 def test_multiplexed_auto_archive_tick_sweeps_every_served_profile_store(two_homes, monkeypatch):
     """The auto-archive sweep reaches each served profile's OWN state.db.
 

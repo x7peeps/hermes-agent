@@ -1741,7 +1741,7 @@ async def _resolve_handoff_watch_scopes(runner: object) -> list:
     config = getattr(runner, "config", None)
     if config is not None and not getattr(config, "multiplex_profiles", False):
         return [(None, None)]
-    offload = getattr(runner, "_run_in_executor_with_context", None)
+    offload = getattr(runner, "_run_housekeeping_in_executor", None)
     if callable(offload):
         return await offload(_handoff_watch_scopes, runner)
     return _handoff_watch_scopes(runner)
@@ -4520,11 +4520,6 @@ def _start_gateway_housekeeping(
         # Per served profile: each profile has its own skills tree, curator state, Nous login
         # and state.db.
         (60, "Curator tick", profile_scoped_chore(runner, _housekeeping_curator)),
-        (60, "state.db maintenance tick", profile_scoped_chore(
-            runner,
-            # Default-bound now, i.e. OUTSIDE any profile scope: this is the launch home's override.
-            lambda _launch=_launch_sessions_dir(getattr(runner, "config", None)):
-                _housekeeping_state_db_maintenance(_launch))),
         # Due-gated inside: the first tick after startup runs an overdue check, not tick 60.
         # Per served profile: plugins dir, last-run marker and plugins.auto_apply are all the
         # profile's own (get_hermes_home()/load_config_readonly() bind to the scope).
@@ -4545,6 +4540,10 @@ def _start_gateway_housekeeping(
         queue_watch = DeliveryQueueWatch(
             served_homes, lambda: _drain_restart_safe_cron_deliveries(adapters, loop, runner))
 
+    # Check retention hourly, offset from the startup window. Capture the launch
+    # transcript directory outside any profile scope, as for later sweeps.
+    launch_sessions = _launch_sessions_dir(getattr(runner, "config", None))
+    maintain_sessions = profile_scoped_chore(runner, lambda: _housekeeping_state_db_maintenance(launch_sessions))
     logger.info("Gateway housekeeping started (interval=%ds)", interval)
     tick_count = 0
     while not stop_event.is_set():
@@ -4552,6 +4551,11 @@ def _start_gateway_housekeeping(
         for every, label, fn in chores:
             if tick_count % every == 0:
                 _housekeeping_chore(label, fn)
+        # Half-hour offset, not the first tick: a retention sweep on a multi-GB store
+        # writes for minutes, and running it while the Desktop is still attaching
+        # makes the local client wait behind the write lock.
+        if tick_count % 60 == 31:
+            _housekeeping_chore("state.db maintenance tick", maintain_sessions)
         wait_for_next_tick(stop_event, interval, queue_watch, _housekeeping_chore)
     logger.info("Gateway housekeeping stopped")
 

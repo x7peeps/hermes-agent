@@ -173,7 +173,12 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
         storage_source, title = 'bot_room', f'Group: {dispatch.room_id}'
     from gateway.session_history_mount import is_history_mount
     if session_id in authority.sessions and not is_history_mount(authority.sessions[session_id]):
-        if (authority.sessions[session_id].source.platform != Platform.API_SERVER
+        # Mirror session_api_turn.admit_api_steps: a foreign-source session whose
+        # owning surface already ended it (ended_at set) has no live concurrent
+        # writer, so the API may bind and continue it. In-progress sessions stay
+        # refused to protect the owning surface's writes.
+        _ended = (authority.db.get_session(session_id) or {}).get('ended_at') is not None
+        if not _ended and (authority.sessions[session_id].source.platform != Platform.API_SERVER
                 or authority.db.get_session(session_id)['source'] != storage_source):
             raise RuntimeStoreError('permission_denied')
     # An API session is the shared-listener row of the transport matrix: the launch profile's

@@ -103,3 +103,46 @@ def test_shutdown_stops_the_housekeeping_pool():
     assert runner._housekeeping_executor is None
     with pytest.raises(RuntimeError):
         runner._get_housekeeping_executor()
+
+
+@pytest.mark.parametrize('operation', ['idle_gate', 'profile_scan', 'goals_warmup'])
+def test_repeated_background_probes_reuse_workers_and_preserve_context(monkeypatch, operation):
+    from contextvars import ContextVar
+    from types import SimpleNamespace
+    from gateway import run
+    from gateway.run_idle_gates import off_loop_gate
+    from hermes_cli import goals
+
+    profile = ContextVar('probe_profile', default=None)
+    threads = set()
+    runner = _runner()
+    runner.config = SimpleNamespace(multiplex_profiles=True)
+
+    def probe(*args):
+        assert profile.get() == 'secondary-profile'
+        threads.add(threading.current_thread())
+        return True
+
+    monkeypatch.setattr(run, '_handoff_watch_scopes', probe)
+    monkeypatch.setattr(goals, '_get_session_db', probe)
+
+    async def poll():
+        token = profile.set('secondary-profile')
+        try:
+            for _ in range(20):
+                if operation == 'idle_gate':
+                    assert await off_loop_gate(runner, probe)
+                elif operation == 'profile_scan':
+                    assert await run._resolve_handoff_watch_scopes(runner)
+                else:
+                    await runner._warm_goals_session_db('probe')
+        finally:
+            profile.reset(token)
+
+    try:
+        asyncio.run(poll())
+        assert threads
+        assert len(threads) < 20, 'every poll created a fresh thread'
+        assert runner._executor is None, 'background probes used the turn executor'
+    finally:
+        runner._shutdown_executor()

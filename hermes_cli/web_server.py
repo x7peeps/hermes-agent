@@ -1059,6 +1059,9 @@ def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):
         ws_ping_interval=ping_interval,
         ws_ping_timeout=ping_timeout,
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
+        # Off like build_listener_server: per-frame deflate on this loop
+        # trades a GIL round-trip per frame against negligible loopback gain.
+        ws_per_message_deflate=False,
         # Desktop sends a single SIGTERM and escalates to SIGKILL ~5s later;
         # uvicorn's default (None) waits on lingering ASGI tasks forever, so a
         # mid-turn request orphans the backend past that budget (#76244). 3s
