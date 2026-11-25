@@ -604,12 +604,19 @@ async def recover_gateway_native_sessions(runner):
 async def recover_profile_native_sessions(runner, authority):
     """Bind one authority's queued native rows to the adapters connected now."""
     from gateway.session_authorities import owner_scope
-    with owner_scope(authority):
-        pending = {row['target_session_id'] for row in authority.db._read_all(
-            "SELECT DISTINCT target_session_id FROM session_admissions WHERE status IN ('queued','unknown')")}
-        bindings = [(owner, entry.origin, runner._adapter_for_source(entry.origin))
+    def find_pending_routes():
+        with owner_scope(authority):
+            pending = {row['target_session_id'] for row in authority.db._read_all(
+                "SELECT DISTINCT target_session_id FROM session_admissions WHERE status IN ('queued','unknown')")}
+            if not pending:
+                return []
+            return [(owner, entry.origin)
                     for entry in runner.session_store.list_sessions() if entry.origin is not None
                     for owner in [authority.logical_owner(entry.session_id)] if owner in pending]
+
+    routes = await asyncio.to_thread(find_pending_routes)
+    with owner_scope(authority):
+        bindings = [(owner, origin, runner._adapter_for_source(origin)) for owner, origin in routes]
         outcome = await authority.recover_native_sessions(bindings)
     for sid, verdict in outcome.items():
         logger.info('Native session startup recovery %s (%s): %s', sid, authority.profile_id, verdict)

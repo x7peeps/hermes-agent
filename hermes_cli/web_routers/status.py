@@ -463,18 +463,24 @@ async def _advisory_pressure(status: dict[str, Any], home: Path) -> None:
         except Exception:
             status[key] = {"pressure": "unknown"}
 
-    try:
+    def read_rebuild_status():
         from hermes_state import SessionDB as _SDB
         from hermes_constants import get_hermes_home as _ghh
         _db_path = _ghh() / "state.db"
         if _db_path.exists():
             _sdb = _SDB(db_path=_db_path, read_only=True)
             try:
-                _rebuild = _sdb.fts_rebuild_status()
+                return _sdb.fts_rebuild_status()
             finally:
                 _sdb.close()
-            if _rebuild is not None:
-                status["fts_rebuild"] = _rebuild
+        return None
+
+    try:
+        # Opening even a read-only store probes SQLite/FTS; keep the entire
+        # lifetime off the gateway loop, carrying the requesting profile context.
+        _rebuild = await run_in_threadpool(read_rebuild_status)
+        if _rebuild is not None:
+            status["fts_rebuild"] = _rebuild
     except Exception:
         pass
 
