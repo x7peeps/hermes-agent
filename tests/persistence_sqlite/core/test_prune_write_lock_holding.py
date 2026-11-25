@@ -87,7 +87,7 @@ def test_prune_skips_a_session_a_turn_started_mid_sweep(db, store, media_root, s
 
     guard_calls = {"n": 0}
 
-    def _guard_after_selection(holder, conn, ids):
+    def _guard_after_selection(holder, conn, candidates):
         # The selection sweep asks once; the per-chunk re-check asks again. Guard
         # only from the second ask on, so the session is selected and then spared
         # by the chunk-time re-check.

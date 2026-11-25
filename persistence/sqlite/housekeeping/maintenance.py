@@ -245,28 +245,39 @@ class SQLiteSessionMaintenance(SessionPortability):
             raise ValueError("prune_sessions() never deletes open sessions: include_open is archive-only")
         where, where_params = _prune_where(older_than_days, source, filters, whole_lineages=True)
         removed_ids: list[str] = []
-        def _do(conn):
+        def _select(conn):
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
                 session_ids -= _guarded_ids(holder, conn, session_ids)
             session_ids = retire_prunable(conn, sorted(session_ids), media_root=media_root)
             prune_retired_tombstones(conn)  # every prune pass also reclaims expired deletion tombstones
-            if not session_ids:
-                return 0
-            # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
-            for chunk in _id_chunks(session_ids):
-                ph = _placeholders(chunk)
-                conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-                removed_ids.extend(chunk)
-            _delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
+            return sorted(session_ids)
         with translated():
             holder = self._store.holder()
-            count = holder._execute_write(_do)
-        return PruneResult(count=count, deleted_ids=tuple(SessionId(sid) for sid in removed_ids))
+            session_ids = holder._execute_write(_select) or []
+            if not session_ids:
+                return PruneResult(count=0, deleted_ids=())
+            # One transaction PER CHUNK. A single BEGIN IMMEDIATE over every chunk held the WAL
+            # write lock for minutes on a multi-GB store (7.3 GB here), and every other opener
+            # waited behind it: the Desktop's backend could not open the store, so its ticket
+            # mint and API calls timed out while the sweep ran. Chunk-sized transactions release
+            # the lock between chunks; each delete stays idempotent under retry, and the write
+            # guard is re-checked per chunk because the lock is no longer held across the sweep.
+            for chunk in _id_chunks(session_ids):
+                def _delete(conn, chunk=chunk):
+                    guarded = _guarded_ids(holder, conn, chunk) if exclude_active_write_guards else set()
+                    live = [sid for sid in chunk if sid not in guarded]
+                    if not live:
+                        return []
+                    ph = _placeholders(live)
+                    conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", live)
+                    conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", live)
+                    conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", live)
+                    return live
+                removed_ids.extend(holder._execute_write(_delete) or [])
+            holder._execute_write(lambda conn: _delete_unreferenced_system_prompts(conn))
+        return PruneResult(count=len(removed_ids), deleted_ids=tuple(SessionId(sid) for sid in removed_ids))
 
     def prune_empty_ghost_sessions(self, *, media_root: str) -> tuple[SessionId, ...]:
         cutoff = time.time() - 86400

@@ -790,6 +790,21 @@ def get_session(holder: StoreHolder, session_id: str) -> Optional[dict[str, Any]
     return _session_row_dict(row) if row else None
 
 
+def get_session_runtime_row(holder: StoreHolder, session_id: str) -> Optional[dict[str, Any]]:
+    """Runtime identity and display metadata, without a token-accounting barrier.
+
+    These columns are independent of queued usage deltas. Gateway metadata reads
+    must not wait on the token writer on the socket/heartbeat event loop.
+    Cost readers still use ``get_session`` for exact totals.
+    """
+    row = holder._read_one(
+        "SELECT id, source, title, started_at, last_activity_at, runtime_revision, runtime_generation "
+        "FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    return dict(row) if row else None
+
+
 def get_session_list_row(holder: StoreHolder, session_id: str) -> Optional[dict[str, Any]]:
     """Picker columns only: the live listing skips ``get_session``'s prompt/tool JOIN and flush."""
     row = holder._read_one(

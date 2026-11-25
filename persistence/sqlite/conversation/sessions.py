@@ -44,11 +44,11 @@ from ._store.prompt_refresh import count_sessions_with_stored_prompt, prompt_ref
 from ._store.search import search_sessions_by_id
 from ._store.sql_common import _sql_session_last_active
 from ._store.sessions import (
-    INTERNAL_LISTING_SOURCES, _own_profile_name, _parse_model_config,
-    backfill_acp_session_cwd, backfill_null_session_profiles, backfill_repo_roots,
-    clear_session_activity_labels, count_empty_sessions, create_session, declared_scope_identity, delete_empty_sessions,
-    delete_session, delete_session_if_empty, delete_sessions, discard_unadmitted_session, end_session, get_session,
-    get_session_delete_targets, get_session_list_row, get_session_model_config_value, list_recent_sessions_bounded,
+    INTERNAL_LISTING_SOURCES, _own_profile_name, _parse_model_config, backfill_acp_session_cwd,
+    backfill_null_session_profiles, backfill_repo_roots, clear_session_activity_labels, count_empty_sessions,
+    create_session, declared_scope_identity, delete_empty_sessions, delete_session, delete_session_if_empty,
+    delete_sessions, discard_unadmitted_session, end_session, get_session, get_session_delete_targets,
+    get_session_list_row, get_session_model_config_value, get_session_runtime_row, list_recent_sessions_bounded,
     list_sessions_rich, patch_session_model_config, promote_to_session_reset, publish_session_git_metadata,
     reopen_session, resolve_session_id, retire_undrained_queue_rows, search_sessions, session_count,
     session_count_by_source, session_count_ge, session_lifecycle_statuses, session_unread, set_session_archived,
@@ -680,6 +680,17 @@ class SQLiteSessionRepository:
         with refusals(holder, session_id):
             row = get_session(holder, session_id)
         return session_record(row) if row else None
+
+    def runtime_row(self, session_id: SessionId) -> Optional[dict[str, Any]]:
+        """Runtime identity and display metadata, without a token-accounting barrier.
+
+        These columns are independent of queued usage deltas. Gateway metadata reads
+        must not wait on the token writer on the socket/heartbeat event loop.
+        Cost readers still use ``get`` for exact totals.
+        """
+        holder = self._store.holder()
+        with refusals(holder, session_id):
+            return get_session_runtime_row(holder, session_id)
 
     def owns_session(self, session_id: SessionId) -> bool:
         holder = self._store.holder()
