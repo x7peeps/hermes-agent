@@ -1844,6 +1844,13 @@ MEMORY_GUARD_MB_PER_WORKER = 512
 DERIVED_MAX_IN_PROGRESS_FLOOR = 2
 DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
+# Share of the machine's cores one concurrent worker may claim when the
+# default has to be derived from the CPU count alone (total memory unknown).
+# A worker is an agent turn that also runs tools, so a quarter of the cores
+# is a conservative share — the same "errs toward fewer workers" posture the
+# memory-derived cap takes.
+CPU_COUNT_MAX_IN_PROGRESS_DIVISOR = 4
+
 
 def _system_memory_sample() -> dict:
     """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
@@ -1859,17 +1866,41 @@ def _system_memory_sample() -> dict:
         return {}
 
 
+def _cpu_count_max_in_progress() -> Optional[int]:
+    """Concurrency cap derived from the CPU count alone.
+
+    Used when total memory is unknown — macOS and Windows report no
+    ``mem_total_kib`` through the Linux-only sampler, so the memory-derived
+    cap has no answer there and the dispatcher used to fan out EVERY ready
+    card at once. That saturates the owner's event loop: each worker's
+    gateway WebSocket handshake then exceeds its 10s open timeout, every
+    worker exits 1, and the cards trip the failure breaker instead of
+    progressing.
+
+    ``None`` only when the CPU count is unknown too, so dispatch is never
+    bricked on a host that reports neither.
+    """
+    cpus = os.cpu_count()
+    if isinstance(cpus, bool) or not isinstance(cpus, int) or cpus <= 0:
+        return None
+    workers = cpus // CPU_COUNT_MAX_IN_PROGRESS_DIVISOR
+    return max(DERIVED_MAX_IN_PROGRESS_FLOOR, min(workers, DERIVED_MAX_IN_PROGRESS_CEILING))
+
+
 def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
-    """Memory-derived default for ``kanban.max_in_progress`` when unset:
-    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)``. Returns
-    ``None`` (no cap) when total memory is unknown, so macOS/Windows dev
-    machines are unaffected.
+    """Derived default for ``kanban.max_in_progress`` when unset:
+    ``clamp(MemTotal / MEMORY_GUARD_MB_PER_WORKER, FLOOR, CEILING)``.
+
+    Falls back to a CPU-count-derived cap when total memory is unknown
+    (macOS/Windows): an unbounded fan-out starves the owner's event loop and
+    the workers' own handshakes time out, so "unknown" must not mean "no
+    cap" there. An explicit ``kanban.max_in_progress`` still wins over both.
     """
     if sample is None:
         sample = _system_memory_sample()
     total_kib = sample.get("mem_total_kib")
     if isinstance(total_kib, bool) or not isinstance(total_kib, int) or total_kib <= 0:
-        return None
+        return _cpu_count_max_in_progress()
     workers = (total_kib // 1024) // MEMORY_GUARD_MB_PER_WORKER
     return max(DERIVED_MAX_IN_PROGRESS_FLOOR, min(workers, DERIVED_MAX_IN_PROGRESS_CEILING))
 
