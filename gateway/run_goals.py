@@ -54,7 +54,7 @@ class GatewayGoalsMixin:
         try:
             from hermes_cli.goals import _get_session_db as _warm_goals_db
 
-            await self._run_in_executor_with_context(_warm_goals_db)
+            await self._run_housekeeping_in_executor(_warm_goals_db)
         except Exception as exc:
             logger.warning("%s: session DB warm-up failed: %s", label, exc)
 
@@ -576,7 +576,7 @@ class GatewayGoalsMixin:
             # run the state.db init on the loop thread before the first read.
             await self._warm_goals_session_db("loop wakeup")
             # Off-loop too: the read is lock-free under WAL but convoys on the writer lock without it.
-            active_loops = await self._run_in_executor_with_context(list_active_loops)
+            active_loops = await self._run_housekeeping_in_executor(list_active_loops)
             now = time.time()
             for sid, state in active_loops:
                 await self._loop_wakeup_fire_one(sid, state, now, warned_no_route, profile_name)
@@ -588,7 +588,7 @@ class GatewayGoalsMixin:
                 for profile_name, profile_home in await _resolve_handoff_watch_scopes(self):
                     # Idle gate (run_idle_gates): skip the scope entry when the profile's store holds
                     # no active loop. The root scan (None) is unscoped and stays cheap.
-                    if profile_home is not None and not await self._run_in_executor_with_context(
+                    if profile_home is not None and not await self._run_housekeeping_in_executor(
                             profile_has_active_loop, profile_home):
                         continue
                     async with _scope(profile_home):

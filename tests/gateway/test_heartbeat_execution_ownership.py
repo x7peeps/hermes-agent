@@ -94,7 +94,7 @@ async def test_restart_does_not_restore_suspended_heartbeat(tmp_path):
     runner.session_store = SessionStore(tmp_path / "sessions", config)
     runner._heartbeat_watch = {}
     runner._start_heartbeat_poller = lambda: None
-    runner._run_in_executor_with_context = asyncio.to_thread
+    runner._run_housekeeping_in_executor = asyncio.to_thread
     try:
         await restore_heartbeat_watches(runner)
         assert runner._heartbeat_watch == {}

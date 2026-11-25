@@ -486,7 +486,15 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float | None = 
             # The home as given too: resolving a link can lead out of the root, past its marker.
             observed = run_elsewhere_verdict(profile_home) or _observe_replacing_stale(home, deadline, replaced)
             if observed.reason_code == "control_timeout":
-                continue  # the probe used its whole budget; the next one raises unless extended
+                # One slow control answer is not a verdict. A healthy listener answers
+                # in milliseconds, but a loaded machine can push a single poll past its
+                # timeout; condemning a running gateway on the first timeout made the
+                # Desktop's ensure fail (and the backend die) while the gateway was
+                # ready. Keep polling until this call's own deadline is actually spent.
+                if remaining(deadline) <= 0:
+                    return GatewayDiscovery("starting", reason_code="deadline")
+                time.sleep(min(0.25, remaining(deadline)))
+                continue
             if observed.state == "draining" and observed.reason_code in _RETIRING:
                 retiring, requested, child = True, False, None
                 waiting.clear()

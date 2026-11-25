@@ -21,6 +21,7 @@ import socket
 import stat
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -42,6 +43,12 @@ _DEFAULT_CLIENT_TIMEOUT = 2.0
 # refuses the socket, and an inode a previous container left there can be neither stat'ed nor
 # removed from inside (#123761). Not EADDRINUSE: a live sibling must keep failing loudly.
 _SOCKET_UNSUPPORTED_ERRNOS = frozenset({errno.EOPNOTSUPP, errno.ENOTSUP})
+# How long the private control loop may take to bind before the gateway treats the
+# control surface as unavailable. The bind is a handful of file operations; the
+# budget only covers a loaded machine's scheduler delay.
+_CONTROL_LOOP_START_TIMEOUT = 15.0
+# How long shutdown waits for the private loop to close its listener.
+_CONTROL_LOOP_STOP_TIMEOUT = 5.0
 
 
 def _home_hash(home: Path) -> str:
@@ -221,10 +228,21 @@ class GatewayControlServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._pipe_server: Any = None  # Windows proactor pipe server
         self._request_dispatch: ControlRequestDispatcher | None = None
+        # The private loop the POSIX listener runs on (None on Windows, which has its
+        # own threads). See _start_posix_off_loop for why it cannot be the main loop.
+        self._control_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._control_thread: Optional[threading.Thread] = None
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
         self._fallback_root: Optional[Path] = None  # mkdtemp root created for a squatted fallback
         self._file_identities = {}
+        # Liveness/identity/ticket traffic must not queue behind unrelated
+        # ``asyncio.to_thread`` work sharing the default executor: with many busy
+        # turns the default pool saturates and Desktop reads every request as a
+        # gateway timeout. The handlers run on the dispatcher's own ``gateway-control``
+        # pool, and the listener itself runs on a private loop (see
+        # ``_start_posix_off_loop``), so neither the accept nor the handler waits on
+        # the busy main loop.
         self._handlers: dict[str, Callable[..., dict[str, Any]]] = {
             "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
 
@@ -237,11 +255,60 @@ class GatewayControlServer:
             # milliseconds. It also pins the code identity the gateway booted with, not a checkout
             # an update swapped in before the first client asked.
             await asyncio.to_thread(build_identify_payload)
-            return await (self._start_windows() if _IS_WINDOWS else self._start_posix())
+            return await (self._start_windows() if _IS_WINDOWS else self._start_posix_off_loop())
         except Exception as exc:
             await self.stop()
             logger.warning("Gateway control socket failed to start: %s", exc)
             return False
+
+    async def _start_posix_off_loop(self) -> bool:
+        """Bind and serve the POSIX listener on a private event loop, on its own thread.
+
+        The gateway's main loop carries every adapter, turn and cron callback, so a
+        GIL-bound stall on it delays the *accept* of a control connection by the same
+        amount: the gateway is up, but its liveness surface cannot answer. The Desktop
+        reads that silence as "Gateway starting (deadline)" and the TUI bootstrap gives
+        up with "gateway starting: deadline" (the ``control_timeout`` verdict), then
+        respawns its backend in a loop. Windows already serves the control plane on
+        dedicated threads (``NativeControlServer``); POSIX must not tie liveness to the
+        busy loop either.
+
+        The handlers keep their own loop references: the gateway builds every verb
+        handler with the main loop captured at startup, so only the listener moves.
+        """
+        main_loop = asyncio.get_running_loop()
+        ready: asyncio.Future = main_loop.create_future()
+
+        def _settle(value: Any = None, error: Optional[BaseException] = None) -> None:
+            if ready.done():
+                return
+            if error is not None:
+                ready.set_exception(error)
+            else:
+                ready.set_result(value)
+
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._control_loop = loop
+            try:
+                loop.run_until_complete(self._start_posix())
+            except BaseException as exc:
+                main_loop.call_soon_threadsafe(_settle, None, exc)
+                with contextlib.suppress(Exception):
+                    loop.close()
+                return
+            main_loop.call_soon_threadsafe(_settle, True)
+            try:
+                loop.run_forever()
+            finally:
+                with contextlib.suppress(Exception):
+                    loop.close()
+
+        thread = threading.Thread(target=_run, name="gateway-control-loop", daemon=True)
+        self._control_thread = thread
+        thread.start()
+        return bool(await asyncio.wait_for(ready, timeout=_CONTROL_LOOP_START_TIMEOUT))
 
     async def _start_posix(self) -> bool:
         if self._request_dispatch is None:
@@ -309,7 +376,14 @@ class GatewayControlServer:
         """Stop serving and remove the socket/pointer files."""
         if self.ticket_store is not None:
             self.ticket_store.revoke()
-        if self._server is not None:
+        loop = self._control_loop
+        if loop is not None:
+            # The listener belongs to the private loop: close it there, not here.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.wrap_future(asyncio.run_coroutine_threadsafe(self._close_listener(), loop)),
+                    timeout=_CONTROL_LOOP_STOP_TIMEOUT)
+        elif self._server is not None:
             self._server.close()
             with contextlib.suppress(Exception):
                 await self._server.wait_closed()
@@ -320,7 +394,22 @@ class GatewayControlServer:
         if self._request_dispatch is not None:
             self._request_dispatch.close()
             self._request_dispatch = None
+        if loop is not None:
+            with contextlib.suppress(Exception):
+                loop.call_soon_threadsafe(loop.stop)
+            thread = self._control_thread
+            if thread is not None and thread.is_alive():
+                with contextlib.suppress(Exception):
+                    await asyncio.get_running_loop().run_in_executor(None, thread.join, _CONTROL_LOOP_STOP_TIMEOUT)
+        self._control_loop = self._control_thread = None
         self.cleanup_files()
+
+    async def _close_listener(self) -> None:
+        """Close the UNIX listener from the loop that owns it."""
+        if self._server is not None:
+            self._server.close()
+            with contextlib.suppress(Exception):
+                await self._server.wait_closed()
 
     def cleanup_files(self) -> None:
         """Best-effort removal of socket + pointer files (atexit-safe)."""
@@ -439,6 +528,8 @@ class GatewayControlServer:
             dispatcher = self._request_dispatch
             if dispatcher is None:
                 return  # listener shutdown won the race with this connection's read
+            # Handlers read disk; the dispatcher keeps them off the loop that drives
+            # every platform adapter, so a fast-polling consumer can't stall heartbeats.
             response = await dispatcher.dispatch(
                 self.handle_request_line, raw.rstrip(b"\n"), self._posix_peer_subject(writer))
             writer.write(response)

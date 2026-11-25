@@ -636,3 +636,42 @@ def test_windows_pipe_query_is_bounded_when_the_peer_never_answers(home: Path, m
         assert time.monotonic() - start < 2.0
     finally:
         released.set()
+
+
+def test_control_surface_answers_while_the_calling_loop_is_stalled(home: Path):
+    """The control surface must not live on the caller's event loop.
+
+    The gateway's main loop carries every adapter, turn and cron callback; a
+    GIL-bound stall on it delays the *accept* of a control connection by the same
+    amount. The Desktop then reads the silence as "Gateway starting (deadline)"
+    and the TUI bootstrap gives up with "gateway starting: deadline", so the
+    listener runs on its own loop instead (Windows already serves the control
+    plane on dedicated threads).
+    """
+    import threading
+    import time
+
+    server = GatewayControlServer(home)
+
+    async def main():
+        assert await server.start() is True
+        try:
+            assert server._control_loop is not asyncio.get_running_loop()
+            answer: dict = {}
+
+            def _client():
+                answer["payload"] = query_gateway_control(home, "identify", timeout=1.0)
+
+            probe = threading.Thread(target=_client)
+            probe.start()
+            # The caller's loop is stalled for longer than the client's whole budget.
+            # The synchronous sleep is the point: the loop must be blocked, not
+            # merely idle, so awaiting here would not reproduce the stall.
+            time.sleep(2.5)  # noqa: ASYNC251
+            probe.join(timeout=5)
+            assert not probe.is_alive()
+            assert answer.get("payload") is not None, "control surface answered only after the stall"
+        finally:
+            await server.stop()
+
+    _run(main())

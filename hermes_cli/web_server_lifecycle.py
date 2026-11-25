@@ -605,6 +605,10 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
     # one frame per streamed token of every running session: under load it was the largest single
     # cost on the loop. Loopback bytes are free, so only a listener remote peers reach (a non-loopback
     # bind, or a loopback bind behind a public URL / tunnel, which engages the auth gate) compresses.
+    # Each zlib compress/flush releases then re-takes the GIL; with the gateway's thread population
+    # (turns, cron, SDK workers) the re-take waits behind hundreds of runnable threads, so multi-MB
+    # Desktop sync frames stall the loop in 30-60s bursts and identify / bootstrap deadlines expire
+    # (sampled: main thread 57% take_gil, 36% zlib_Compress_* inside task_step).
     per_message_deflate = auth_required or host not in _LOOPBACK_HOST_VALUES
     if ws_ping is None:
         ws_ping = (None, None) if host in _LOOPBACK_HOST_VALUES else (

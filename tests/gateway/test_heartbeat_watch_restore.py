@@ -1,6 +1,9 @@
 """Restart recovery uses current routing and never borrows another profile's heartbeat."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
+from threading import current_thread
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +15,46 @@ from gateway.session import SessionStore, SessionSource
 from hermes_cli import goals
 from hermes_cli.heartbeat import HeartbeatManager, HeartbeatState
 from persistence_assembly import open_persistence, profile_scope
+
+
+@pytest.mark.asyncio
+async def test_restore_reuses_housekeeping_worker_and_registers_on_loop(tmp_path, monkeypatch):
+    from gateway.run_heartbeat_restore import restore_heartbeat_watches
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    store = runner.session_store = SessionStore(tmp_path / 'sessions', runner.config)
+    context = ContextVar('poll', default=None)
+    scans = []
+    registrations = []
+
+    def probe(home):
+        scans.append((current_thread(), context.get()))
+        return True
+
+    def register(key, source, session_id):
+        registrations.append((asyncio.get_running_loop(), key, session_id))
+
+    monkeypatch.setattr('gateway.run_idle_gates.profile_has_active_heartbeat', probe)
+    runner._register_heartbeat_watch = register
+    loop = asyncio.get_running_loop()
+    try:
+        entry = store.get_or_create_session(SessionSource(platform=Platform.TELEGRAM, chat_id='chat'))
+        HeartbeatManager(entry.session_id).set('check', 60)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            runner._housekeeping_executor = pool
+            worker = await loop.run_in_executor(pool, current_thread)
+            for poll in (1, 2):
+                token = context.set(poll)
+                try:
+                    await restore_heartbeat_watches(runner)
+                finally:
+                    context.reset(token)
+        assert scans == [(worker, 1), (worker, 2)]
+        assert registrations == [(loop, entry.session_key, entry.session_id)] * 2
+    finally:
+        store.close_all_db_handles()
 
 
 @pytest.mark.asyncio
@@ -52,7 +95,7 @@ async def test_restore_retries_persisted_routes_in_their_own_profiles(tmp_path, 
         runner._start_heartbeat_poller = lambda: None
         runner._profile_name_for_source = lambda source, adapter_profile=None: source.profile
         runner._delivery_adapter_for = lambda source: object()
-        runner._run_in_executor_with_context = asyncio.to_thread
+        runner._run_housekeeping_in_executor = asyncio.to_thread
         original = runner.session_store.list_sessions
         with monkeypatch.context() as patch:
             patch.setattr(runner.session_store, 'list_sessions', lambda: (_ for _ in ()).throw(OSError('cold index')))
@@ -104,7 +147,7 @@ async def test_restore_skips_session_sweep_when_no_heartbeats_exist(tmp_path, mo
         runner.config = config
         runner.session_store = store
         runner._heartbeat_watch = {}
-        runner._run_in_executor_with_context = asyncio.to_thread
+        runner._run_housekeeping_in_executor = asyncio.to_thread
         sweeps = []
         original = store.list_sessions
         monkeypatch.setattr(store, 'list_sessions',
@@ -162,7 +205,7 @@ async def test_startup_arms_retry_poller_even_without_any_watches(monkeypatch):
     runner.adapters = {}
     runner._send_update_notification = AsyncMock(return_value=True)
     runner.session_store = SimpleNamespace(list_sessions=list)
-    runner._run_in_executor_with_context = asyncio.to_thread
+    runner._run_housekeeping_in_executor = asyncio.to_thread
     monkeypatch.setattr('gateway.channel_directory.build_channel_directory', AsyncMock(return_value={}))
     await runner._start_post_connect_services(0)
     task = getattr(runner, '_heartbeat_poll_task', None)
@@ -208,7 +251,7 @@ async def test_restore_enters_each_profile_scope_once_per_scan(tmp_path, monkeyp
         runner._start_heartbeat_poller = lambda: None
         runner._profile_name_for_source = lambda source: source.profile
         runner._adapter_for_source = lambda source: object()
-        runner._run_in_executor_with_context = asyncio.to_thread
+        runner._run_housekeeping_in_executor = asyncio.to_thread
         entered = []
         real = GatewayRunner._profile_scope_for_source
 

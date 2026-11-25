@@ -156,7 +156,7 @@ async def test_watcher_gates_profile_scope_on_pending_handoffs(monkeypatch):
         fake = types.SimpleNamespace()
         fake.persistence = _store(db)
         fake._running = _Running()
-        fake._run_in_executor_with_context = asyncio.to_thread
+        fake._run_housekeeping_in_executor = asyncio.to_thread
 
         async def _process_handoff(row, profile_name=None):
             return None
@@ -278,7 +278,7 @@ async def test_watcher_resolves_scopes_off_the_event_loop(monkeypatch):
 
     fake = types.SimpleNamespace(persistence=_store(_RecordingDB()), _running=_Running(),
                                  _process_handoff=_process_handoff,
-                                 _run_in_executor_with_context=asyncio.to_thread)
+                                 _run_housekeeping_in_executor=asyncio.to_thread)
     await asyncio.wait_for(run.GatewayRunner._handoff_watcher(fake, interval=0.0), timeout=5)
 
     assert on_loop == [False, False], f"reclaim + tick must resolve scopes off-loop; got {on_loop}"

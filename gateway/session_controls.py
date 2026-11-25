@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+from contextlib import AsyncExitStack
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -391,7 +392,11 @@ class AuthorityConnection:
             from gateway.session_authorities import async_owner_scope
             from gateway.session_connections import METHODS as CONNECTION_METHODS, session_owned
             from gateway.session_plugin_rpc import call_plugin_rpc, resolve_plugin_rpc
-            async with async_owner_scope(self.authority):
+            async with AsyncExitStack() as _scopes:
+                if method != 'ping':
+                    # Ping checks only this connection's capabilities, never profile state:
+                    # keep liveness independent of secret/config/terminal-policy disk reads.
+                    await _scopes.enter_async_context(async_owner_scope(self.authority))
                 if method in GROUP_METHODS or method == 'profiles.list':
                     result = await dispatch_group_control(self, method, params)
                 elif method not in handlers and (plugin := await resolve_plugin_rpc(self, method)) is not None:
