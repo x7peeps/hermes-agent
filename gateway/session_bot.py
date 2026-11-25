@@ -701,8 +701,13 @@ async def recover_bot_deliveries(authority):
         for path, record in records:
             if not record or record.get('profile_home') != str(home) or not record.get('admission_id'):
                 continue
+            if record.get('status') == 'settled' and isinstance(record.get('reply'), str):
+                # Settlement already wrote the final reply. Recovery only has work for incomplete
+                # receipts, legacy receipts without a reply, and failures eligible for retry.
+                remember_receipt(authority, home, record)
+                continue
             try:
-                record.update(_result(authority, record))
+                record.update(await asyncio.to_thread(_result, authority, record))
                 if record['status'] in {'queued', 'claimed'}:
                     _watch_reply(authority, home, record['delivery_id'],
                                  record.get('retry_admission_id') or record['admission_id'])

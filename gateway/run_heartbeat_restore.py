@@ -70,7 +70,7 @@ async def restore_heartbeat_watches(runner) -> None:
         return restored
 
     try:
-        candidates = await runner._run_in_executor_with_context(scan)
+        candidates = await runner._run_housekeeping_in_executor(scan)
         for key, source, session_id in candidates:
             # A reset/compression may have published a new owner during the executor hop.
             if store.peek_session_id(key) == session_id:

@@ -423,7 +423,7 @@ def local_session_info(authority, ref):
     from gateway.session_policy import policy_for_source
     policy = policy_for_source(authority.runner, live.source)
     if live.source is None:  # a history mount: what its stored row says
-        source = authority.db.get_session(ref.session_id)['source']
+        source = authority.db.get_session_runtime_row(ref.session_id)['source']
     else:
         source = policy.source if policy else live.source.platform.value
     info = {'source': source,
@@ -471,7 +471,7 @@ def _classic_cli_fields(authority, ref, live, agent, policy):
         stored_id = local_receipt(authority.db, ref.session_id)['entry']['session_id'] or stored_id
     row = {}
     with contextlib.suppress(Exception):
-        row = authority.db.get_session(stored_id) or {}
+        row = authority.db.get_session_runtime_row(stored_id) or {}
     yolo = bool(policy is not None and getattr(policy, 'yolo', False))
     with contextlib.suppress(Exception):
         from tools.approval import is_session_yolo_enabled

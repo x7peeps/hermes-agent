@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import re
+from contextlib import nullcontext
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -320,7 +321,9 @@ class AuthorityConnection:
             # the scope is that profile's own home, so behaviour is unchanged.
             from gateway.session_authorities import owner_scope
             from gateway.session_connections import METHODS as CONNECTION_METHODS, session_owned
-            with owner_scope(self.authority):
+            # Ping checks only this connection's capabilities, never profile state.
+            # Keep liveness independent of secret/config/terminal-policy disk reads.
+            with nullcontext() if method == 'ping' else owner_scope(self.authority):
                 if method in GROUP_METHODS or method == 'profiles.list':
                     result = await dispatch_group_control(self, method, params)
                 elif method not in handlers or (method in CONNECTION_METHODS and not session_owned(params)):

@@ -597,6 +597,15 @@ def build_listener_server(served_app, host: str, port: int, *, auth_required: bo
         ws_ping_interval=ws_ping[0],
         ws_ping_timeout=ws_ping[1],
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
+        # Permessage-deflate compresses every outgoing frame ON this event
+        # loop, and each zlib compress/flush releases then re-takes the GIL.
+        # With the gateway's thread population (turns, cron, SDK workers) the
+        # re-take waits behind hundreds of runnable threads, so multi-MB
+        # Desktop sync frames stall the loop in 30-60s bursts and identify /
+        # bootstrap deadlines expire (sampled: main thread 57% take_gil,
+        # 36% zlib_Compress_* inside task_step). Loopback JSON gains almost
+        # nothing from deflate; keep the loop free of per-frame GIL round-trips.
+        ws_per_message_deflate=False,
         # Desktop sends a single SIGTERM and escalates to SIGKILL ~5s later;
         # uvicorn's default (None) waits on lingering ASGI tasks forever, so a
         # mid-turn request orphans the backend past that budget (#76244). 3s

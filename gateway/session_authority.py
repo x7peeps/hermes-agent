@@ -323,7 +323,7 @@ class SessionAuthority:
         return sorted(rows.values(), key=lambda row: row['seq'])
 
     def _handle(self, ref):
-        row = self.db.get_session(ref.session_id)
+        row = self.db.get_session_runtime_row(ref.session_id)
         if row is None:  # deleted after ``authorize``: the commit lands before the retirement runs
             raise RuntimeStoreError('not_found')
         pending = self._pending_rows(ref)
