@@ -501,6 +501,11 @@ def test_collect_fleet_versions_falls_back_to_state_file(tmp_path: Path, monkeyp
     process wrote the record) stays visible as ``unknown`` with no
     self-reported sha; only the verified gateway PID is classified
     ``current``/``stale`` from the file (#110420).
+
+    v0.23.4 adds a ``code_root`` comparison before the SHA check: a gateway
+    whose checkout root differs from the updater's is classified ``external``.
+    The test process runs from the same checkout, so we make ``_gateway_code_root``
+    return the expected root so the SHA comparison produces ``stale``.
     """
     import os
 
@@ -508,6 +513,11 @@ def test_collect_fleet_versions_falls_back_to_state_file(tmp_path: Path, monkeyp
 
     home = tmp_path / ".hermes"
     home.mkdir()
+
+    # The expected checkout root is whatever ``_updater_code_root()`` returns
+    # for this process — same checkout, so the state-file PID should classify
+    # by SHA, not as ``external``.
+    expected_root = ur._code_root_for_path(str(Path(ur.__file__).resolve()))
 
     monkeypatch.setattr(
         "hermes_cli.version_info.get_code_identity",
@@ -521,6 +531,10 @@ def test_collect_fleet_versions_falls_back_to_state_file(tmp_path: Path, monkeyp
     )
     monkeypatch.setattr(
         "gateway.control_socket.identify_gateway", lambda h, **kw: None
+    )
+    monkeypatch.setattr(
+        ur, "_gateway_code_root",
+        lambda pid, h: expected_root if pid == os.getpid() else None,
     )
     (home / "gateway_state.json").write_text(
         json.dumps(

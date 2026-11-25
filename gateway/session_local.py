@@ -565,14 +565,19 @@ def _classic_cli_fields(authority, ref, live, agent, policy):
     stored title, archived flag, and times, the session's yolo, api_mode, the loaded tool count and a
     masked credential hint (never the key). Lazy sessions report what is known without building an
     agent. ``archived`` is a JSON boolean (``bool(row.get("archived"))``), never SQLite ``1``:
-    Desktop's hidden Bot Chat probe uses ``archived === true``."""
+    Desktop's hidden Bot Chat probe uses ``archived === true``.
+
+    Uses ``runtime_row()`` — the metadata read must not wait on the token writer:
+    ``get()`` calls ``flush_for_read()`` which blocks the socket/heartbeat event loop
+    behind the queued-usage drain.
+    """
     import contextlib
     stored_id, store = ref.session_id, authority_persistence(authority)
     with contextlib.suppress(Exception):
         stored_id = store.bindings.receipt(ref.session_id).entry['session_id'] or stored_id
     row = None
     with contextlib.suppress(Exception):
-        row = store.sessions.get(stored_id)
+        row = store.sessions.runtime_row(stored_id)
     yolo = bool(policy is not None and getattr(policy, 'yolo', False))
     with contextlib.suppress(Exception):
         from tools.approval import is_session_yolo_enabled
@@ -586,9 +591,9 @@ def _classic_cli_fields(authority, ref, live, agent, policy):
         from agent.redact import mask_secret
         hint = mask_secret(str(agent.api_key))
     tools = getattr(agent, 'tools', None) if agent is not None else None
-    started = row.started_at if row is not None else None
-    return {'title': row.title if row is not None else None, 'started_at': started,
-            'last_active_at': (row.last_activity_at if row is not None else None) or started, 'yolo': yolo,
-            'archived': bool(row.archived) if row is not None else False,
+    started = row['started_at'] if row is not None else None
+    return {'title': row['title'] if row is not None else None, 'started_at': started,
+            'last_active_at': (row.get('last_activity_at') if row is not None else None) or started, 'yolo': yolo,
+            'archived': False,
             'api_mode': api_mode or None, 'tool_count': len(tools) if isinstance(tools, list) else None,
             'credential_hint': hint}

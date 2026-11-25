@@ -805,6 +805,22 @@ def get_session_runtime_row(holder: StoreHolder, session_id: str) -> Optional[di
     return dict(row) if row else None
 
 
+def get_session_token_counters(holder: StoreHolder, session_id: str) -> Optional[dict[str, Any]]:
+    """Token counter columns only, without a token-accounting barrier.
+
+    Returns a dict with ``input_tokens``, ``output_tokens``, ``cache_read_tokens``,
+    ``cache_write_tokens``, ``reasoning_tokens``, ``api_call_count``, and ``model``.
+    Gateway metadata reads (``snapshot_usage``) must not wait on the token writer.
+    """
+    row = holder._read_one(
+        "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
+        "reasoning_tokens, api_call_count, model "
+        "FROM sessions WHERE id = ?",
+        (session_id,),
+    )
+    return dict(row) if row else None
+
+
 def get_session_list_row(holder: StoreHolder, session_id: str) -> Optional[dict[str, Any]]:
     """Picker columns only: the live listing skips ``get_session``'s prompt/tool JOIN and flush."""
     row = holder._read_one(

@@ -224,8 +224,10 @@ def snapshot_usage(authority, ref, agent) -> dict | None:
         result["compression_count"] = carried_compression_count(authority.sessions.get(ref.session_id), agent)
         return tui_usage(result)
     from gateway.session_persistence import authority_persistence
-    row = authority_persistence(authority).sessions.get(ref.session_id)
-    return tui_usage(_stored_stats(row.as_session_row())) if row else None
+    from persistence.sqlite.conversation._store.sessions import get_session_token_counters
+    holder = authority_persistence(authority).sessions._store.holder()
+    row = get_session_token_counters(holder, ref.session_id)
+    return tui_usage(_stored_stats(row)) if row else None
 
 
 async def account_usage(connection, ref, params):
