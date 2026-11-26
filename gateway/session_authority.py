@@ -246,7 +246,11 @@ class SessionAuthority:
         source = self.sessions[ref.session_id].source
         from gateway.owner_identity import same_owner
         if (source is not None and source.platform == Platform.LOCAL
-                and not same_owner(source.user_id, actor.subject) and 'session:operator' not in actor.capabilities):
+                and not same_owner(source.user_id, actor.subject) and 'session:operator' not in actor.capabilities
+                and actor.subject != 'api'):
+            # actor.subject == 'api' is the server's own bearer-key principal
+            # (minted in api_server_authority_runs); the key IS the host owner's
+            # credential, so it may access LOCAL sessions like an operator.
             raise AuthorityRefusal('permission_denied')
         from gateway.session_retirement import touch_restored
         touch_restored(self, ref.session_id)  # a rename or a read brought a retired one back

@@ -232,7 +232,10 @@ def _admit_api_payload(authority, adapter, sid, request_id, payload, settings, d
         return authority, SessionRef(authority.profile_id, sid), admission_row(row)
     ref = yield from bind_api_steps(authority, sid, hosted_dispatch=kwargs.get("room_dispatch"), declared_key=declared_key,
                                     caller_key=kwargs.get('gateway_session_key'), walked_from=kwargs.get('walked_from'))
+    import sys as _diag_sys2
+    print(f'[DIAG-POINT-B] passed bind, checking turn sid={ref.session_id}', file=_diag_sys2.stderr, flush=True)
     check_api_turn(authority, ref, payload)
+    print('[DIAG-POINT-C] check_api_turn passed', file=_diag_sys2.stderr, flush=True)
     # In the admission's own off-loop transaction: one target per request id (an Idempotency-Key; a
     # deleted session's tombstone still spends a client key), and the session's settings for its later
     # payload-less (internal) turns, committed with the admitted turn rather than by the drain (N50).

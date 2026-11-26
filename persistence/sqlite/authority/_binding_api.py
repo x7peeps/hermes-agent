@@ -60,9 +60,13 @@ def bind_api(holder, *, epoch, session_id, route, storage_source, title, declare
                 raise AuthorityRefusal('admission_conflict')
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
                          (_DECLARED_PREFIX + declared_key, session_id))
-        row = conn.execute('SELECT source,session_key,title FROM sessions WHERE id=?', (session_id,)).fetchone()
+        row = conn.execute('SELECT source,session_key,title,ended_at FROM sessions WHERE id=?', (session_id,)).fetchone()
         if row is not None and row['source'] != storage_source:
-            raise AuthorityRefusal('permission_denied')
+            # A foreign-source session whose owning surface already ended it
+            # (ended_at set) has no live concurrent writer — the API may adopt
+            # it for continuation. In-progress sessions stay refused.
+            if row['ended_at'] is None:
+                raise AuthorityRefusal('permission_denied')
         if storage_source == 'bot_room':
             if row is not None and row['title'] != title:
                 raise AuthorityRefusal('admission_conflict')

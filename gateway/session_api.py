@@ -184,6 +184,8 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
             raise AuthorityRefusal('admission_conflict')
         storage_source, title = 'bot_room', f'Group: {dispatch.room_id}'
     from gateway.session_history_mount import is_history_mount
+    import sys as _diag_sys
+    print(f'[DIAG-POINT-A] bind_api_steps sid={session_id} in_sessions={session_id in authority.sessions}', file=_diag_sys.stderr, flush=True)
     if session_id in authority.sessions and not is_history_mount(authority.sessions[session_id]):
         # Mirror session_api_turn.admit_api_steps: a foreign-source session whose
         # owning surface already ended it (ended_at set) has no live concurrent
