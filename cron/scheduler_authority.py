@@ -227,8 +227,16 @@ def reconcile_pending(*, allow_connect=True):
             # The canonical receipt supplies the result; a dead scheduler's fire claim does not
             # authorize replay and must not prevent finishing its durable bookkeeping.
             fence = _FireOwnership(dict(job, fire_claim=None))
-            _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
-                                 verbose=False, execution_token=None)
+            # Delivery reads profile-scoped credentials (MATRIX_HOME_ROOM et al.) via
+            # get_secret, which fails closed under multiplex when no scope is active. The
+            # tick's ``_profile_cron_scope`` binds only the home override, so this recovery
+            # path raised UnscopedSecretError on every tick — the journal stayed and the
+            # same traceback retried forever (HX-local-2026-11-28). Install the firing
+            # profile's scope for exactly this delivery span, same as a live fire.
+            from cron.scheduler import _fire_secret_scope
+            with _fire_secret_scope():
+                _save_compose_deliver(delivery, fence, answer, output, adapters=None, loop=None,
+                                      verbose=False, execution_token=None)
             fail_empty_response(delivery, answer)
             if finish_completed_run(delivery, None, params['request_id'], recovered=True):
                 _lift_pause(params['job_id'], record.get('pause_recorded'))

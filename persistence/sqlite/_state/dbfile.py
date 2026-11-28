@@ -257,6 +257,29 @@ def _stat_sqlite_sidecar_identity(db_path: Path) -> dict[str, tuple]:
     idents = {suffix: _stat_db_file_identity(Path(base + suffix)) for suffix in ("-wal", "-shm")}
     return {suffix: ident for suffix, ident in idents.items() if ident is not None}
 
+# Freshness gate for the full-fd-table deleted-sidecar scan (HX-local-2026-11-27, re-landing the
+# 2026-11-23 patch that an upstream refactor displaced): the scan walks every process's every
+# descriptor via libproc, takes seconds under load, and its 5 s expiry abandons (leaks) one
+# daemon thread per timeout; the open-path lock-patience retry loop then re-triggers it per
+# retry. The gate is IDENTITY-based, deliberately not a time TTL: a TTL would serve a stale
+# "no holders" verdict to a second opener within the TTL window after the holder cleaned up,
+# so `refuse_deleted_wal_generation` would fail to refuse a replacement-WAL mint inside that
+# window (rejected by `test_clean_open_and_second_open_still_work` in the 11-23 round). Stat is
+# O(1): if the db/-wal/-shm (st_dev, st_ino) triple is unchanged since the last scan, no
+# sidecar replacement can have happened, so the previous verdict still holds; any change
+# triggers a fresh scan immediately.
+_SIDECAR_SCAN_CACHE_NONE = (None, None)
+_sidecar_scan_cache: list = list(_SIDECAR_SCAN_CACHE_NONE)
+_sidecar_scan_cache_lock = threading.Lock()
+
+
+def _sidecar_identity_triple(db_path) -> tuple:
+    """O(1) freshness probe: identities of the main db and both sidecars (None when absent)."""
+    path = Path(os.path.abspath(os.fspath(db_path)))
+    main = _stat_db_file_identity(path)
+    sidecars = _stat_sqlite_sidecar_identity(path)
+    return (main, sidecars.get("-wal"), sidecars.get("-shm"))
+
 
 def _watched_sqlite_sidecar_paths(db_path) -> dict[str, str]:
     """Map each sidecar's canonical (/proc-comparable) form to its literal, still-named path,
@@ -491,6 +514,11 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
     inode must not mint a replacement WAL (``_foreign_state_db_holders`` skips this PID)."""
     if sys.platform == "win32":
         return []
+    triple = _sidecar_identity_triple(db_path)
+    with _sidecar_scan_cache_lock:
+        cached_triple, cached_holders = _sidecar_scan_cache
+    if triple == cached_triple and cached_holders is not None:
+        return list(cached_holders)
     holders: list[tuple[int, str]] = []
     try:
         if sys.platform == "darwin":
@@ -504,6 +532,10 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> list[tuple[int, str]]:
                     holders.append((pid, target))
     except Exception as exc:
         logger.debug("deleted-WAL holder scan failed for %s: %s", db_path, exc)
+        return holders
+    with _sidecar_scan_cache_lock:
+        _sidecar_scan_cache[0] = triple
+        _sidecar_scan_cache[1] = list(holders)
     return holders
 
 
